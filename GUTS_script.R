@@ -2,9 +2,16 @@ setwd("~/Documents/PhD/Psychiatry/DATA/Data/")
 library(tidyverse)
 library(vegan)
 library(ape)
+library(MetBrewer) #Lets plot with some art :)
+library(ggrepel)
+ggplot <- function(...) ggplot2::ggplot(...) + scale_color_manual(values=met.brewer("Manet",5)[c(1,5)] ) +
+  scale_fill_manual(values=met.brewer("Manet", 5)[c(1,5)] )
+
+
 
 Case = read_tsv("Cases.tsv")
 Control = read_tsv("Matched_controls.tsv")
+
 
 #1. Compute prevalences
 Comp_Prevalence = function(DF){
@@ -21,7 +28,8 @@ full_join(Prevalence_cases, Prevalence_controls, by="Bug", suffix = c("_case", "
 Prevalence %>% ggplot(aes(x=Prevalence_case, y=Prevalence_control)) + geom_point() + theme_bw()+ geom_abline()
 rbind( select(Control, c(ID, Prevalence$Bug) ), select(Case, c(ID, Prevalence$Bug) ))  -> Data
 #Add annotation about which cohort does it belong to
-Data %>% mutate(Cohort = ifelse(grepl("LL", ID), "Case", "Control" )) -> Data_c
+Data %>% mutate(Cohort = ifelse(grepl("LL", ID), "Control", "Case" )) -> Data_c
+Data_c$Cohort = factor(Data_c$Cohort, levels= c("Control", "Case"))
 
 #Check if proportion of unknown is different between cohorts
 summary(lm(UNKNOWN ~ Cohort, Data_c)) #On average, there seems to be a bit more of unknown in controls.
@@ -81,7 +89,7 @@ Beta_taxonomy = function(Data_t, Data_c){
     theme_bw() + stat_ellipse() +
     geom_point(aes(x=mean.x,y=mean.y),size=5)+
     geom_segment(aes(x=mean.x, y=mean.y, xend=Axis.1, yend=Axis.2), alpha=0.5) -> Fig
-  
+  print(Fig)
   
   #B PERMANOVA
   adonis2(Beta_diversity ~ Data_c$Cohort, permutations = 5000) %>% print()
@@ -131,29 +139,45 @@ Run_balance_analysis = function(Balance_input, Labels = Data_c$Cohort, lambda=1)
     
   print("Train results")
   codacoreAUC = model$ensemble[[1]]$AUC
-  cat("Train set AUC =", codacoreAUC, "\n")
-
+  cat("Train set AUC (model 1) =", codacoreAUC, "\n")
+  codacoreAUC = model$ensemble[[2]]$AUC
+  cat("Train set AUC (model 2) =", codacoreAUC, "\n")
+  
   ##Test
   yHat <- predict(model, newx = xTest)
   print("Test results")
   testAUC <- pROC::auc(pROC::roc(yTest, yHat, quiet=T))
   cat("Test set AUC =", testAUC, "\n")
   
+  failure <- yHat < 0.5 ; success <- yHat >= 0.5
+  yHat[failure] <- levels(yTest)[1] ; yHat[success] <- levels(yTest)[2]
+  cat("Classification accuracy on test set =", round(mean(yHat == yTest), 2))
+  
+  
   plot(model)
   plotROC(model)
-  Numerators = colnames(xTrain)[getNumeratorParts(model, 1)]
+  Numerators = colnames(xTrain)[getNumeratorParts(model, 1)] 
   Denominators = colnames(xTrain)[getDenominatorParts(model, 1)]
+  Numerators2 = colnames(xTrain)[getNumeratorParts(model, 2)] 
+  Denominators2 = colnames(xTrain)[getDenominatorParts(model, 2)]
   
-  return(list(Numerators, Denominators))
+  return(list(Numerators, Denominators, Numerators2, Denominators2))
 }   
-Run_balance_analysis(Data) -> Balances
-Data %>% select(Balances[[1]]) %>% apply(1, sum) -> Numerator
-Data %>% select(Balances[[2]]) %>% apply(1, sum) -> Denominator
-Data %>% mutate( Balance = log10(Numerator/Denominator), Cohort = Data_c$Cohort ) ->Data_b
+
+#Get only prevalent bacteria for the model
+Prevalence %>% filter(N_case > 20 & N_control > 20) -> Keep
+Run_balance_analysis( select(Data, c("ID", Keep$Bug)) ) -> Balances
+Data %>% select(Balances[[1]]) %>% apply(1, sum) -> Numerator ; Data %>% select(Balances[[3]]) %>% apply(1, sum) -> Numerator2
+Data %>% select(Balances[[2]]) %>% apply(1, sum) -> Denominator ; Data %>% select(Balances[[4]]) %>% apply(1, sum) -> Denominator2
+Data %>% mutate( Balance = log10(Numerator/Denominator), Balance2 = log10(Numerator2/Denominator2), Cohort = Data_c$Cohort ) ->Data_b
 Data_b %>%
   ggplot(aes(x=Cohort, y= Balance, col=Cohort))  + geom_violin() + theme_bw() + coord_flip() + geom_jitter() +
   stat_summary(fun = "median",geom = "crossbar", aes(color = Cohort)) + stat_summary(fun = "mean", geom = "point", color= "black")
 summary(lm(Balance ~ Cohort, filter(Data_b, ! abs(Balance) == Inf )))
+Data_b %>%
+  ggplot(aes(x=Cohort, y= Balance2, col=Cohort))  + geom_violin() + theme_bw() + coord_flip() + geom_jitter() +
+  stat_summary(fun = "median",geom = "crossbar", aes(color = Cohort)) + stat_summary(fun = "mean", geom = "point", color= "black")
+summary(lm(Balance2 ~ Cohort, filter(Data_b, ! abs(Balance2) == Inf )))
 
 #Association analysis
 Inverse_rank_normal = function(Measurement){
@@ -173,11 +197,11 @@ Association_analysis = function(Prevalence, DF, Data_c, FILTER=20){
     lm(B_n ~ Cohort, Model_input ) -> Model_out_n
     #If not normalized
     Normality = shapiro.test(Model_out$residuals)$p.value
-    as.data.frame(summary(Model_out)$coefficients)["CohortControl",] %>% as_tibble() %>%
+    as.data.frame(summary(Model_out)$coefficients)["CohortCase",] %>% as_tibble() %>%
       mutate(Bug = Bug, Shapiro_p = Normality, .before=1) -> results
     #Normalized
     Normality = shapiro.test(Model_out_n$residuals)$p.value
-    as.data.frame(summary(Model_out_n)$coefficients)["CohortControl",] %>% as_tibble() %>%
+    as.data.frame(summary(Model_out_n)$coefficients)["CohortCase",] %>% as_tibble() %>%
       mutate(Bug = Bug, Shapiro_p = Normality, .before=1) -> Normalized_results
     
     left_join(results, Normalized_results, by= "Bug", suffix = c("","_norm")) -> results
@@ -200,10 +224,32 @@ Association_results2 %>% ggplot(aes(x = -log10(`Pr(>|t|)`), y = -log10(`Pr(>|t|)
   theme_bw() + geom_point() + geom_abline() + geom_vline(xintercept = -log10(0.05), color = "red") + geom_hline(yintercept = -log10(0.05), color = "red")
 Association_results2 %>% arrange(`Pr(>|t|)_norm`) %>% select(-c(`Std. Error`, `t value`, `Std. Error_norm`, `t value_norm` )) -> Top_results
 #Check if association results are reproduced in the Balance analysis 
-Balances_results = tibble(Bug = Balances[[1]], Direction = "Positive")
-Balances_results = rbind(Balances_results, tibble(Bug = Balances[[2]], Direction = "Negative") )
-Top_results %>% select(Bug, Estimate_norm, `Pr(>|t|)_norm` ) -> Associated
-#seems that most of the bacteria used for the ratios are low prevalence (maybe batch?)
-left_join(Associated,Balances_results) -> Assoc_Balance_info
+Balances_results = tibble(Bug = unique(c(Balances[[1]], Balances[[3]])), Direction_balance = "Positive")
+Balances_results = rbind(Balances_results, tibble(Bug = unique(c(Balances[[2]], Balances[[4]])), Direction_balance = "Negative") )
+# 42 nominally significant results, 8/16 bugs used in balances
+left_join(Top_results,Balances_results) -> Top_results
+Top_results %>% select(Bug, Estimate_norm, `Pr(>|t|)_norm`, Direction_balance ) -> Associated
 
+
+#Compute FDR using label permutations
+Null_distribution = c()
+Permutation_number = 100
+for (Permutation_n in seq(Permutation_number) ){
+  Data_perm = Data_c
+  Data_perm$Cohort = sample(Data_c$Cohort, replace = F,size = dim(Data_c)[1] )
+  Association_analysis(Prevalence, All_taxonomy, Data_perm, FILTER=10) -> Association_results_p
+  Null_distribution = c(Null_distribution, Association_results_p$`Pr(>|t|)_norm`)
+}
+
+sapply( Top_results$`Pr(>|t|)_norm`, function(x){ sum( Null_distribution <= x  )/Permutation_number  } ) -> FDR_perm
+FDR_perm[FDR_perm > 1] = 1
+Top_results %>% mutate(FDR_permutation = FDR_perm ) -> Top_results
+Top_results %>% arrange(`Pr(>|t|)_norm`) %>% select(`Pr(>|t|)_norm`, FDR_permutation)
+
+Top_results %>% ggplot(aes(x=Estimate_norm, y= -log10(`Pr(>|t|)_norm`), col=FDR_permutation<0.05, shape= is.na(Direction_balance) )) +
+  geom_hline( yintercept = -log10(0.05), color="red" ) + geom_point() + theme_bw() +
+  geom_label_repel(data = Top_results %>% filter(FDR_permutation<0.05) %>% unique(), 
+                   aes(label = Bug),
+                   color = "black")
+  
 
