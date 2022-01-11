@@ -12,7 +12,11 @@ ggplot <- function(...) ggplot2::ggplot(...) + scale_color_manual(values=met.bre
 Case = read_tsv("Cases.tsv")
 Control = read_tsv("Matched_controls.tsv")
 
-
+#Covariate Read number
+Case_readN = read_tsv("Read_number.tsv") %>%  mutate(Cohort = "Case") 
+Control_readN = read_tsv("DAG3_readnumber.tsv") %>% mutate(Cohort = "Control") %>% filter(ID %in% Control$ID)
+rbind(Case_readN, Control_readN) -> Read_number
+Read_number %>% ggplot(aes(x=Read_number, fill=Cohort )) + geom_histogram(alpha=0.5, position="identity") + theme_bw()
 #1. Compute prevalences
 Comp_Prevalence = function(DF){
   #Compute prevalence of different taxa
@@ -73,7 +77,7 @@ for (i in c("p", "c", "o", "f", "g")){
 
 
 #Compute beta diversity at the species level
-Beta_taxonomy = function(Data_t, Data_c){
+Beta_taxonomy = function(Data_t, Data_c, Meta = Read_number){
   #Compute diversity
   vegdist(select(Data_t, -ID), method = "euclidean") -> Beta_diversity
   
@@ -92,20 +96,22 @@ Beta_taxonomy = function(Data_t, Data_c){
   print(Fig)
   
   #B PERMANOVA
-  adonis2(Beta_diversity ~ Data_c$Cohort, permutations = 5000) %>% print()
+  left_join(Data_c, Meta) -> Data_m
+  adonis2(Beta_diversity ~ Data_m$Read_number  + Data_m$Cohort, permutations = 5000) %>% print()
   
 }
 Beta_taxonomy(Species_data, Data_c)
 
 #Compute alpha diversity at the species level ; need to do this in non-transformed data
-Alpha_taxonomy = function(Data, Data_c, Taxonomy = "s"){
+Alpha_taxonomy = function(Data, Data_c, Taxonomy = "s", Meta = Read_number){
   paste( c(Taxonomy, "__"), collapse="" ) -> Ta
   colnames(select(Data, -c(ID, UNKNOWN ))) -> Taxa
   Taxa[grepl(Ta, Taxa)] -> Taxa
   Data %>% select(Taxa)  -> Data_taxonomy
   diversity(Data_taxonomy, "shannon" ) -> Diversity
   Data_c %>% select(ID, Cohort) %>% mutate(Diversity = Diversity) -> Data_div
-  summary(lm(Diversity ~ Cohort,Data_div)) %>% print()
+  left_join(Data_div, Meta) -> Data_div
+  summary(lm(Diversity ~ Cohort + Read_number,Data_div)) %>% print()
   ggplot(Data_div, aes(x=Cohort, y=Diversity, col=Cohort))  + geom_violin() +
   theme_bw() + coord_flip() + geom_jitter() +
     stat_summary(fun = "median",geom = "crossbar", aes(color = Cohort)) +
@@ -183,7 +189,7 @@ summary(lm(Balance2 ~ Cohort, filter(Data_b, ! abs(Balance2) == Inf )))
 Inverse_rank_normal = function(Measurement){
   qnorm((rank(Measurement,na.last="keep")-0.5)/sum(!is.na(Measurement)))
 }
-Association_analysis = function(Prevalence, DF, Data_c, FILTER=20){
+Association_analysis = function(Prevalence, DF, Data_c, FILTER=20, Meta=Read_number){
   Total_results = tibble()
   Prevalence %>% filter(N_case > FILTER & N_control > FILTER) %>% filter(! Bug == "UNKNOWN") -> To_Test
   for (Bug in To_Test$Bug){
@@ -193,8 +199,9 @@ Association_analysis = function(Prevalence, DF, Data_c, FILTER=20){
     normalized_Bug = Inverse_rank_normal(vector_Bug)
     #invers rank normal transf?
     Data_c %>% select(ID, Cohort) %>% mutate(B =  vector_Bug, B_n = normalized_Bug) -> Model_input
-    lm(B ~ Cohort, Model_input ) -> Model_out
-    lm(B_n ~ Cohort, Model_input ) -> Model_out_n
+    left_join(Model_input, Meta) -> Model_input
+    lm(B ~ Cohort+ Read_number, Model_input  ) -> Model_out
+    lm(B_n ~ Cohort+ Read_number, Model_input  ) -> Model_out_n
     #If not normalized
     Normality = shapiro.test(Model_out$residuals)$p.value
     as.data.frame(summary(Model_out)$coefficients)["CohortCase",] %>% as_tibble() %>%
@@ -251,5 +258,5 @@ Top_results %>% ggplot(aes(x=Estimate_norm, y= -log10(`Pr(>|t|)_norm`), col=FDR_
   geom_label_repel(data = Top_results %>% filter(FDR_permutation<0.05) %>% unique(), 
                    aes(label = Bug),
                    color = "black")
-  
+write_tsv(Top_results, "Sumamry_statistics_TaxonomyAnalysis.csv")  
 
