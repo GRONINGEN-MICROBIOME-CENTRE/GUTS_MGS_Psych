@@ -342,3 +342,131 @@ Association_results_ptw %>% ggplot(aes(x=Estimate_norm, y= -log10(`Pr(>|t|)_norm
                    aes(label = Bug),
                    color = "black")
 write_tsv(Association_results_ptw, "Summary_statistics_PathwayAnalysis.csv")  
+
+
+################################
+#Bayesian regression analysis##
+###############################
+
+library(fido)
+library(phyloseq)
+
+Fit_pibble_bayesian =  function(Data, Read_number, Prevalence,Plot_n, Prev_thresho=20, Taxonomy_level = "s"){
+  if (! Taxonomy_level == "Path"){
+    paste( c(Taxonomy_level, "__"), collapse="" ) -> Ta
+    colnames(dplyr::select(Data, -c(ID, UNKNOWN ))) -> Taxa
+    Taxa[grepl(Ta, Taxa)] -> Taxa
+    Data %>% dplyr::select(Taxa)  -> Data_taxonomy
+  } else { Data_taxonomy = dplyr::select(Data, -c(ID,UNMAPPED, UNINTEGRATED)) }
+  #Make data in proportions
+  Y = as.data.frame(Data_taxonomy)
+  rownames(Y) = Data$ID
+  apply(Y, 1, function(x){ x/sum(x) } ) %>% t() -> Y
+  Prevalence %>% filter(N_case > Prev_thresho & N_control > Prev_thresho)  -> To_Test
+  #Seems that this one cannot work in low prevalence bugs... (it needs samples as rows)
+  Y <- zCompositions::cmultRepl(as.data.frame(Y)  %>% dplyr::select(one_of(To_Test$Bug))) # multiplicative 0 replacement 
+  Y = t(Y)
+  #Remove Nor prevalent taxa
+  #Prevalence %>% filter(N_case > Prev_thresho & N_control > Prev_thresho)  -> To_Test #I had to do this so that cmultRepl would work
+  #Y[rownames(Y) %in% To_Test$Bug, ] -> Y
+
+  
+  #Covariates
+  left_join(dplyr::select(Data, ID),  Read_number) -> Covariates
+  Covariates %>% mutate(Cohort = factor(Cohort, levels = c("Control", "Case")))  -> Covariates
+  
+  # your linear model
+  f <- as.formula( " ~ Cohort + Read_number ")
+  # construct a design/model matrix
+  X <- t(model.matrix(f, data=Covariates))
+
+
+  ##-----------------------------------------------------------------------------------------------------------------------
+  # Because pi_j = alrInv(eta_j) it also holds that eta_j = alr(pi_j) (see Pibble documentation)
+  # pi_j denote multinomial category j which exist in the simplex, and eta_j denote the transformed category j which exists in real space  
+  ##-----------------------------------------------------------------------------------------------------------------------
+  N <- ncol(Y) # number of samples
+  D <- nrow(Y) # number of multinomial categories (i.e. features)
+
+ #Eta are the transformed data abundances. Give einitial values
+  eta_init <- t(driver::alr(t(Y))) #What does alr divide for by default?
+  eta_array <- array(eta_init, dim=c(nrow(eta_init), ncol(eta_init), 2000)) # needs to be an array of dimension (D-1) x N x iter 
+ #Priors
+  upsilon <- D+3
+  Omega <- diag(D)
+  G <- cbind(diag(D-1), -1)
+  Xi <- (upsilon-D)*G%*%Omega%*%t(G)
+  Theta <- matrix(0, D-1, nrow(X))
+  Gamma <- diag(nrow(X))
+  #Prior model
+  priors <- pibble(NULL, X, upsilon, Theta, Gamma, Xi)
+  #priors2 <- to_clr(priors) 
+  #Make some checks on the priors
+  #fido::summary(priors2, pars="Lambda")
+  #names_covariates(priors2) <- rownames(X)
+  #fido::plot(priors, par="Lambda") + ggplot2::xlim(c(-10, 10))
+  
+  #Posterior model in logistic normal (no multinomial)
+  posterior <- uncollapsePibble(eta_array, priors$X, priors$Theta, priors$Gamma, priors$Xi, priors$upsilon, seed=4302) # # uncollapsePibble can be fitted on proportions 
+
+  # Attach dimnames
+  dimnames(posterior$Lambda)[[2]] <- rownames(X)
+  dimnames(posterior$Lambda)[[1]] <- rownames(Y)[-length(rownames(Y))]
+  dimnames(posterior$Sigma)[[1]] <- dimnames(posterior$Sigma)[[2]] <- rownames(Y)[-length(rownames(Y))]
+
+  posterior <- pibblefit(D=D,
+                       N=N,
+                       Q=nrow(X),
+                       coord_system="alr",
+                       iter=2000L,
+                       alr_base=D,
+                       Eta=eta_array,
+                       Lambda=posterior$Lambda,
+                       Sigma=posterior$Sigma,
+                       Y=Y,
+                       X=X,
+                       names_categories=rownames(Y),
+                       names_samples=colnames(Y),
+                       names_covariates=rownames(X))
+  #QC, not sure if it works
+  #ppc_summary(posterior)
+  
+  fido::summary(posterior, pars="Lambda")$Lambda  %>% filter(covariate == "CohortCase") %>% mutate( Significant = ifelse(  sign(p2.5) * sign(p97.5) == 1, "yes", "no" )   ) %>% arrange(desc(abs(mean)))  -> Result_bay
+  
+  focus <- Result_bay[sign(Result_bay$p2.5) == sign(Result_bay$p97.5),]
+  if(! length(focus) == 0){
+    focus <- unique(focus$coord)
+    fido::plot(posterior, par="Lambda", focus.coord = focus, focus.cov = rownames(X)[2])
+  }
+  # Change to CLR transform
+  posterior_clr <- to_clr(posterior)
+  # Attached dimnames
+  dimnames(posterior_clr$Lambda)[[2]] <- rownames(X)
+  dimnames(posterior_clr$Lambda)[[1]] <- rownames(Y)
+  dimnames(posterior_clr$Sigma)[[1]] <- dimnames(posterior_clr$Sigma)[[2]] <- rownames(Y)
+
+  fido::summary(posterior_clr, pars="Lambda")$Lambda %>% filter(covariate == "CohortCase") %>% mutate( Significant = ifelse(  sign(p2.5) * sign(p97.5) == 1, "yes", "no" )   ) -> Result_bay_clr
+
+  focus <- Result_bay_clr[sign(Result_bay_clr$p2.5) == sign(Result_bay_clr$p97.5),]
+  if (! length(focus) == 0){
+    focus <- unique(focus$coord)
+    fido::plot(posterior_clr, par="Lambda", focus.coord = focus, focus.cov = rownames(X)[2]) + geom_vline(xintercept = 0) -> To_plot
+    To_plot %>% print()
+    ggsave(Plot_n, To_plot)
+  }
+  
+  return(Result_bay_clr)
+}
+
+
+Bayesian_results = tibble()
+for (i in c("p", "c", "o", "f", "g", "s")){
+  Plot_name = paste(c("Plots/Bayes/Taxonomy_", i, ".pdf" ), collapse="")
+  Fit_pibble_bayesian(Data, Read_number, Prevalence, Prev_thresho = 20, Taxonomy_level = i, Plot_n = Plot_name ) -> Results_b
+  Bayesian_results = rbind(Bayesian_results, Results_b)
+  
+}  
+write_tsv(Bayesian_results,"Summary_statistics_TaxonomyAnalysisBayesian.csv")
+
+Plot_name = "Plots/Bayes/Taxonomy_pathway.pdf" 
+Fit_pibble_bayesian(Data_ptw, Read_number, Prevalence_ptw, Prev_thresho = 20, Plot_n = Plot_name, Taxonomy_level = "Path")
