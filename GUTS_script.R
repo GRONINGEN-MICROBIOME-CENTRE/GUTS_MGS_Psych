@@ -709,159 +709,57 @@ Node_stats %>% left_join(. , Results) %>% ggplot(aes(x=`NESH-score`, y=DelBet, c
 Node_stats %>% filter(DelBet>Between_stats[5] & `NESH-score`>NESH_stats[5]) %>% select(Bug) 
 
 
-################################
-#Bayesian regression analysis##
-###############################
+#4. Subspecies level analysis
 
-packageurl <- "https://cran.r-project.org/src/contrib/Archive/fido/fido_1.0.0.tar.gz"
-install.packages(packageurl, repos=NULL, type="source")
-
-library(fido)
-library(phyloseq)
-
-Fit_pibble_bayesian =  function(Data, Read_number, Prevalence,Plot_n, Prev_thresho=20, Taxonomy_level = "s"){
-  if (! Taxonomy_level == "Path"){
-    paste( c(Taxonomy_level, "__"), collapse="" ) -> Ta
-    colnames(dplyr::select(Data, -c(ID, UNKNOWN ))) -> Taxa
-    Taxa[grepl(Ta, Taxa)] -> Taxa
-    Data %>% dplyr::select(Taxa)  -> Data_taxonomy
-  } else { Data_taxonomy = dplyr::select(Data, -c(ID,UNMAPPED, UNINTEGRATED)) }
-  #Make data in proportions
-  Y = as.data.frame(Data_taxonomy)
-  rownames(Y) = Data$ID
-  apply(Y, 1, function(x){ x/sum(x) } ) %>% t() -> Y
-  Prevalence %>% filter(N_case > Prev_thresho & N_control > Prev_thresho)  -> To_Test
-  #Seems that this one cannot work in low prevalence bugs... (it needs samples as rows)
-  Y <- zCompositions::cmultRepl(as.data.frame(Y)  %>% dplyr::select(one_of(To_Test$Bug))) # multiplicative 0 replacement 
-  Y = t(Y)
-  #Remove Nor prevalent taxa
-  #Prevalence %>% filter(N_case > Prev_thresho & N_control > Prev_thresho)  -> To_Test #I had to do this so that cmultRepl would work
-  #Y[rownames(Y) %in% To_Test$Bug, ] -> Y
-
+Subspecies_analysis = function(File, Distance="mann", FILTER=10){
+  #if (! Distance == "mann" ){ Distance = "allele" }
   
-  #Covariates
-  left_join(dplyr::select(Data, ID),  Read_number) -> Covariates
-  Covariates %>% mutate(Cohort = factor(Cohort, levels = c("Control", "Case")))  -> Covariates
+  File_path = paste0("Data/Data2/metasnv_distances-m2-d5-b80-c5-p0.9/", File)
+  mOTU = str_replace(File, paste0(".filtered.",Distance,".dist"), "")
+  read.table(File_path, header = TRUE, check.names = F, sep = "\t", row.names = 1) -> Distance_matrix
+  rownames(Distance_matrix) %>% sapply(., function(x){str_split(x,".bam")[[1]][1] } ) %>%as.vector() -> Sample_names 
+  rownames(Distance_matrix) = Sample_names ; colnames(Distance_matrix) = Sample_names
+  Distance_matrix %>% rownames_to_column("ID") %>% as_tibble() %>% filter(ID %in% Covariates_all$Sequencing_ID) %>% select_if( colnames(.) %in% c("ID", Covariates_all$Sequencing_ID) ) %>% column_to_rownames("ID") %>% as.data.frame() -> Distance_matrix
   
-  # your linear model
-  f <- as.formula( " ~ Cohort + Read_number ")
-  # construct a design/model matrix
-  X <- t(model.matrix(f, data=Covariates))
-
-
-  ##-----------------------------------------------------------------------------------------------------------------------
-  # Because pi_j = alrInv(eta_j) it also holds that eta_j = alr(pi_j) (see Pibble documentation)
-  # pi_j denote multinomial category j which exist in the simplex, and eta_j denote the transformed category j which exists in real space  
-  ##-----------------------------------------------------------------------------------------------------------------------
-  N <- ncol(Y) # number of samples
-  D <- nrow(Y) # number of multinomial categories (i.e. features)
-
- #Eta are the transformed data abundances. Give einitial values
-  eta_init <- t(driver::alr(t(Y))) #What does alr divide for by default?
-  eta_array <- array(eta_init, dim=c(nrow(eta_init), ncol(eta_init), 2000)) # needs to be an array of dimension (D-1) x N x iter 
- #Priors
-  upsilon <- D+3
-  Omega <- diag(D)
-  G <- cbind(diag(D-1), -1)
-  Xi <- (upsilon-D)*G%*%Omega%*%t(G)
-  Theta <- matrix(0, D-1, nrow(X))
-  Gamma <- diag(nrow(X))
-  #Prior model
-  priors <- pibble(NULL, X, upsilon, Theta, Gamma, Xi)
-  #priors2 <- to_clr(priors) 
-  #Make some checks on the priors
-  #fido::summary(priors2, pars="Lambda")
-  #names_covariates(priors2) <- rownames(X)
-  #fido::plot(priors, par="Lambda") + ggplot2::xlim(c(-10, 10))
-  
-  #Posterior model in logistic normal (no multinomial)
-  posterior <- uncollapsePibble(eta_array, priors$X, priors$Theta, priors$Gamma, priors$Xi, priors$upsilon, seed=4302) # # uncollapsePibble can be fitted on proportions 
-
-  # Attach dimnames
-  dimnames(posterior$Lambda)[[2]] <- rownames(X)
-  dimnames(posterior$Lambda)[[1]] <- rownames(Y)[-length(rownames(Y))]
-  dimnames(posterior$Sigma)[[1]] <- dimnames(posterior$Sigma)[[2]] <- rownames(Y)[-length(rownames(Y))]
-
-  posterior <- pibblefit(D=D,
-                       N=N,
-                       Q=nrow(X),
-                       coord_system="alr",
-                       iter=2000L,
-                       alr_base=D,
-                       Eta=eta_array,
-                       Lambda=posterior$Lambda,
-                       Sigma=posterior$Sigma,
-                       Y=Y,
-                       X=X,
-                       names_categories=rownames(Y),
-                       names_samples=colnames(Y),
-                       names_covariates=rownames(X))
-  #QC, not sure if it works
-  #ppc_summary(posterior)
-  
-  fido::summary(posterior, pars="Lambda")$Lambda  %>% filter(covariate == "CohortCase") %>% mutate( Significant = ifelse(  sign(p2.5) * sign(p97.5) == 1, "yes", "no" )   ) %>% arrange(desc(abs(mean)))  -> Result_bay
-  
-  focus <- Result_bay[sign(Result_bay$p2.5) == sign(Result_bay$p97.5),]
-  if(! length(focus) == 0){
-    focus <- unique(focus$coord)
-    fido::plot(posterior, par="Lambda", focus.coord = focus, focus.cov = rownames(X)[2])
-  }
-  # Change to CLR transform
-  posterior_clr <- to_clr(posterior)
-  # Attached dimnames
-  dimnames(posterior_clr$Lambda)[[2]] <- rownames(X)
-  dimnames(posterior_clr$Lambda)[[1]] <- rownames(Y)
-  dimnames(posterior_clr$Sigma)[[1]] <- dimnames(posterior_clr$Sigma)[[2]] <- rownames(Y)
-
-  fido::summary(posterior_clr, pars="Lambda")$Lambda %>% filter(covariate == "CohortCase") %>% mutate( Significant = ifelse(  sign(p2.5) * sign(p97.5) == 1, "yes", "no" )   ) -> Result_bay_clr
-
-  focus <- Result_bay_clr[sign(Result_bay_clr$p2.5) == sign(Result_bay_clr$p97.5),]
-  if (! length(focus) == 0){
-    focus <- unique(focus$coord)
-    fido::plot(posterior_clr, par="Lambda", focus.coord = focus, focus.cov = rownames(X)[2]) + geom_vline(xintercept = 0) -> To_plot
-    To_plot %>% print()
-    ggsave(Plot_n, To_plot)
+  Covariates_all %>% filter(Sequencing_ID %in% Sample_names) %>% group_by(Status) %>% summarise(N = n()) -> Counts
+  if ( Counts$N[1] < FILTER  |   Counts$N[2] < FILTER ){ 
+    return( list(tibble(mOTU=mOTU, Stat=NA, N_control= Counts$N[1],  N_cases = Counts$N[2], Distance=Distance ), NA ) )
   }
   
-  return(Result_bay_clr)
+  Covariates_all %>% filter(Sequencing_ID %in% Sample_names) -> Covariates_sort
+  Covariates_sort[match(rownames(Distance_matrix), Covariates_sort$Sequencing_ID),] -> Covariates_sort
+  
+  as.matrix(Distance_matrix) %>% as.dist() -> Distance_matrix
+  
+  capscale(Distance_matrix ~ Status, Covariates_sort   ) -> RDA
+  summary(RDA)$sites %>% as_tibble() %>% cbind(. , Covariates_sort) %>% ggplot(aes(x=CAP1, y=MDS1, col=as.factor(Status))) + geom_point() + theme_bw() + ggtitle(mOTU) -> Plot
+  anova(RDA, permutations = 999) -> Stat
+  tibble(mOTU = mOTU, Stat =  Stat$`Pr(>F)`[1], N_control= Counts$N[1],  N_cases = Counts$N[2],  Distance=Distance ) -> Result
+  if( Stat$`Pr(>F)`[1]<0.05) { print(Plot) }
+  return(list(Result, Plot))
+  
 }
 
 
-Bayesian_results = tibble()
-for (i in c("p", "c", "o", "f", "g", "s")){
-  Plot_name = paste(c("Plots/Bayes/Taxonomy_", i, ".pdf" ), collapse="")
-  Fit_pibble_bayesian(Data, Read_number, Prevalence, Prev_thresho = 20, Taxonomy_level = i, Plot_n = Plot_name ) -> Results_b
-  Bayesian_results = rbind(Bayesian_results, Results_b)
+read_delim("Data/Data2/metasnv_distances-m2-d5-b80-c5-p0.9/Number_samples_distance.txt", delim=" ", col_names = F) -> Samples_discovery
+Samples_discovery %>% mutate(X1 = as.numeric(X1)) %>% filter(X1 > 10)  -> Manhattan_to_check
+
+Permanova_stats= tibble()
+for (File in Manhattan_to_check$X2){
+  if (grepl("allele", File)){ D = "allele"
+  } else {
+    D = "mann"
+  }
+  Subspecies_analysis(File, Distance=D, FILTER=5) -> Res
+  Res[[1]] %>% rbind(Permanova_stats, . ) -> Permanova_stats
   
-}  
-write_tsv(Bayesian_results,"Summary_statistics_TaxonomyAnalysisBayesian.csv")
-
-Plot_name = "Plots/Bayes/Taxonomy_pathway.pdf" 
-Fit_pibble_bayesian(Data_ptw, Read_number, Prevalence_ptw, Prev_thresho = 20, Plot_n = Plot_name, Taxonomy_level = "Path")
-
-
-
-Covariates_GUTS 
-Covariates_control
-
-Covariates_all %>% mutate(Age = scale(Age), BMI = scale(BMI) ) %>% select(Age, Sex, BMI) %>% dist(method = "euclidean") -> D 
-All_matches = tibble()
-for (i in  1:104){
-  as.matrix(D)[i,]  -> z
-  which.min(z[104:length(z)]) + 104 -> Answer
-  Matches = tibble(N1 =Covariates_all$Sequencing_ID[i] , N2 =Covariates_all$Sequencing_ID[Answer], Distance=min(z[104:length(z)])  )
-  rbind(All_matches, Matches) -> All_matches
 }
+sapply(Permanova_stats$mOTU, function(x){ colnames(Data)[grepl( x, colnames(Data) )] }) -> Names
+Permanova_stats %>% mutate(Taxa = Names) %>% arrange(Stat) -> Permanova_stats
+Permanova_stats %>% filter(Distance == "allele") %>% mutate(FDR = p.adjust(Stat, "fdr"))
+#Nominal significance evidence of subspecies differences:
+# s__Sutterella species incertae sedis [meta_mOTU_v3_13005]
+# Clostridiales species incertae sedis [meta_mOTU_v3_12974]
+# Not in differential abundance or network  
 
 
-
-read_csv("/Users/sergio/Documents/GitHub/GUTS_MGS_Psych/Data/MetaData/Stats_knead.csv") -> KN
-KN %>% filter(Sample == "LL10_B11_856" )
-
-colnames(KN)[1] = "Sequencing_ID"
-left_join(KN, Covariates_all) -> KN
-
-KN %>% ggplot(aes(x=`Final (p1)`, y=Read_number)) + 
-  geom_point() + facet_wrap(~Batch)
-KN  %>% mutate(Batch = ifelse(grepl("dag3",Batch), "DMP", Batch ) ) %>% filter(!is.na(Batch)) %>%
-  ggplot(aes(x=log10(`Final (p1)`), fill=Batch )) + geom_density(alpha=0.4) + scale_fill_manual(values=met.brewer("Manet", 5)[c(1,5, 3)] )
