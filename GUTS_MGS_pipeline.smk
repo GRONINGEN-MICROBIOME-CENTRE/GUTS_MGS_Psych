@@ -28,8 +28,34 @@ def search(ID, direction):
 rule all:
 	input:
 		"Output/Merged_taxonomy.tsv",
-		"Output/All_kneaddata_reads_stats_F.csv"
+		"Output/All_kneaddata_reads_stats_F.csv",
+		dir("Output/Subspecies/metaSNV")
 	message: "Pipeline complete"
+
+rule metaSNV:
+	input: expand("Output/Subspecies/Alignment/{Sample}.bam",zip,Sample=Dic_files.keys()),
+	output: dir("Output/Subspecies/metaSNV")
+	shell:
+		"""
+		ml Anaconda3/2020.11 SAMtools/1.10-GCC-9.3.0 BWA/0.7.17-GCC-10.2.0
+		ENV=/scratch/umcg-sandreusanchez/BIOM_project/environment
+		set +u; source activate $ENV  ; set -u
+		$MoTus snv_call -d Output/Subspecies/Alignments/ -o {output}
+		"""
+
+rule Align_for_calling:
+	input:
+		Forward = "Reads_clean/{Sample}_kneaddata_cleaned_pair_1.fastq",
+		Reverse = "Reads_clean/{Sample}_kneaddata_cleaned_pair_2.fastq"
+	output:
+		temp("Output/Subspecies/Alignment/{Sample}.bam")
+	shell:
+		"""
+		ml Anaconda3/2020.11 SAMtools/1.10-GCC-9.3.0 BWA/0.7.17-GCC-10.2.0
+		ENV=/scratch/umcg-sandreusanchez/BIOM_project/environment
+		set +u; source activate $ENV  ; set -u
+		$MoTus map_snv -f {input.Forward} -r {input.Reverse} -t 2 > {output}
+		"""
 
 rule merge_motus:
 	input: expand('Output/taxonomy/taxonomy_profile.{Sample}.txt',zip,Sample=Dic_files.keys()),
