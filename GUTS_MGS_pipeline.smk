@@ -29,18 +29,60 @@ rule all:
 	input:
 		"Output/Merged_taxonomy.tsv",
 		"Output/All_kneaddata_reads_stats_F.csv",
-		dir("Output/Subspecies/metaSNV")
+		"Output/Pathway/GBM_quant/"),
+		"Output/Subspecies/metaSNV/")
 	message: "Pipeline complete"
 
+
+
+
+rule KO_to_GBM:
+	input: "Output/Pathway/Merged_genefamilies_KO.tsv"
+	output: directory("Output/Pathway/GBM_quant")
+	params:
+		GBM = "GBMs/GBM.inputfile.txt"
+	shell:
+		"""
+		java -jar omixer-rpm-1.1.jar -a 1  -d {parms.GBM} -o {output} -i {input}
+		"""
+rule MergePathways:
+        input: expand("Output/Pathway/{Sample}_kneaddata/{Sample}_kneaddata_cleaned_paired_merged_genefamilies.tsv", zip,Sample=Dic_files.keys() )
+        output: "Output/Pathway/Merged_genefamilies.tsv"
+        shell:
+                """
+                ml Miniconda3/4.7.10
+                set +u; /data/umcg-tifn/rgacesa/conda_dag3_mp3; set -u
+                humann_join_tables --input Output/Pathway/ --output Output/Pathway/Merged_genefamilies.tsv
+		"""
+
+rule Pathway_to_KO:
+	input: "Output/Pathway/{Sample}_kneaddata/{Sample}_kneaddata_cleaned_paired_merged_genefamilies.tsv"
+	output:	temp("Output/Pathway/{Sample}_kneaddata_cleaned_paired_merged_genefamiliesKO.tsv")
+	shell:
+		"""
+		ml Miniconda3/4.7.10
+		set +u; /data/umcg-tifn/rgacesa/conda_dag3_mp3; set -u
+		humann_regroup_table --input {input} --groups uniref90_ko --output {output}
+		"""
+
+rule QuantifyPathways:
+	input: "Reads_clean/{Sample}_kneaddata_cleaned_paired_merged.fastq" 
+	output: temp("Output/Pathway/{Sample}_kneaddata/{Sample}_kneaddata_cleaned_paired_merged_genefamilies.tsv")
+	shell:
+		"""
+		module load Miniconda3/4.7.10
+		set +u; source activate /data/umcg-tifn/rgacesa/conda_dag3_mp3 ; set -u
+		humann --input {input} --output Output/Pathway/{wildcards.Sample}
+		"""
 rule metaSNV:
 	input: expand("Output/Subspecies/Alignment/{Sample}.bam",zip,Sample=Dic_files.keys()),
-	output: dir("Output/Subspecies/metaSNV")
+	output: directory("Output/Subspecies/metaSNV")
 	shell:
 		"""
 		ml Anaconda3/2020.11 SAMtools/1.10-GCC-9.3.0 BWA/0.7.17-GCC-10.2.0
 		ENV=/scratch/umcg-sandreusanchez/BIOM_project/environment
 		set +u; source activate $ENV  ; set -u
-		$MoTus snv_call -d Output/Subspecies/Alignments/ -o {output}
+		motus snv_call -d Output/Subspecies/Alignments/ -o {output}
 		"""
 
 rule Align_for_calling:
@@ -54,7 +96,7 @@ rule Align_for_calling:
 		ml Anaconda3/2020.11 SAMtools/1.10-GCC-9.3.0 BWA/0.7.17-GCC-10.2.0
 		ENV=/scratch/umcg-sandreusanchez/BIOM_project/environment
 		set +u; source activate $ENV  ; set -u
-		$MoTus map_snv -f {input.Forward} -r {input.Reverse} -t 2 > {output}
+		motus map_snv -f {input.Forward} -r {input.Reverse} -t 2 > {output}
 		"""
 
 rule merge_motus:
@@ -126,6 +168,7 @@ rule kneaddata:
 	output:
 		Paired1 = temp("Reads_clean/{Sample}_kneaddata_cleaned_pair_1.fastq"),
 		Paired2 = temp("Reads_clean/{Sample}_kneaddata_cleaned_pair_2.fastq"),
+		Merged = temp("Reads_clean/{Sample}_kneaddata_cleaned_paired_merged.fastq"),
 		Reads_stats = temp("Output/{Sample}_kneaddata_reads_stats.csv")
 	resources:
 		mem = "24gb",
@@ -137,6 +180,7 @@ set +u; source activate /data/umcg-tifn/rgacesa/conda_dag3_mp3 ; set -u
 kneaddata --input {input.Forward} --input {input.Reverse} --threads 1 --processes 1 --output Reads_clean/{wildcards.Sample}/ --log logs/{wildcards.Sample}_kneaddata.log -db /data/umcg-tifn/rgacesa/dag3_pipeline_v3_dbs/hg37dec_v0.1  --trimmomatic /data/umcg-tifn/rgacesa/conda_dag3_mp3/share/trimmomatic-0.39-2/ --fastqc fastqc --sequencer-source none --trimmomatic-options "LEADING:20 TRAILING:20 SLIDINGWINDOW:4:20 MINLEN:50" --bypass-trf
 mv Reads_clean/{wildcards.Sample}/*_kneaddata_paired_1.fastq {output.Paired1}
 mv Reads_clean/{wildcards.Sample}/*_kneaddata_paired_2.fastq {output.Paired2}
+cat {output.Paired1} {output.Paired2} > {output.Merged}
 rm -r Reads_clean/{wildcards.Sample}/
 # -- PARSE KNEADDATA RESULTS --
 python /data/umcg-tifn/rgacesa/dag3_pipeline_3c/utils/knead3parser.py --infile logs/{wildcards.Sample}_kneaddata.log --outfile {output.Reads_stats}

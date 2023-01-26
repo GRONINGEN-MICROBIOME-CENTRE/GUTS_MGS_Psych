@@ -7,7 +7,7 @@ library(vegan)
 library(ape)
 library(MetBrewer) #Lets plot with some art :)
 library(ggrepel)
-ggplot <- function(...) ggplot2::ggplot(...) + scale_color_manual(values=met.brewer("Manet",5)[c(1,5)] ) +
+ggplot <- function(...) ggplot2::ggplot(...) + scale_color_manual(values=met.brewer("Manet",5)[c(1,5, 3)] ) +
   scale_fill_manual(values=met.brewer("Manet", 5)[c(1,5)] )
 
 ###############
@@ -39,6 +39,8 @@ Format_MP3_table = function( Path_input, Path_output ){
   write_tsv(Path_input, Path_output)
 }
 
+#motus DB 2.6.0, motus 3.0.3 on python 3.7.15
+
 #0. Samples info
 ##0.1 Metadata samples
 ###Cases
@@ -48,7 +50,7 @@ Covariates_GUTS %>% dplyr::filter(Treatment_time == "V2") -> Covariates_GUTS
 ####Check repeated samples  
 Covariates_GUTS %>%  group_by(Sample_ID, Batch) %>% summarise(N = n() ) %>% arrange(desc(N)) -> Repeated #19 repeated samples, 18 in batch 2, 1 in batch 1
 ###Controls
-Covariates_control = read_tsv("Data/MetaData/Covariates_population.tsv") %>% dplyr::rename(Sequencing_ID = ID, Read_number = META.DNA.postclean.reads, Batch=META.BATCH, Sex=Gender) %>% drop_na()
+Covariates_control = read_tsv("Data/MetaData/Covariates_population.tsv") %>% drop_na() #dplyr::rename(Sequencing_ID = ID, Read_number = META.DNA.postclean.reads, Batch=META.BATCH, Sex=Gender) %>% drop_na()
 ##0.2 Sequencing info
 Reads_info = read_csv("Data/Data2/All_kneaddata_reads_stats2_F.csv") %>% dplyr::rename(ID = Sample)
 Reads_info %>% dplyr::select( c("ID",colnames(Reads_info)[grepl("p1", colnames(Reads_info))]) ) %>% gather(Source, Reads, 2:6) -> Reads_info2
@@ -96,6 +98,28 @@ read_tsv("Data/MetaData/Match_with_info_batchTime.tsv") %>% select(ID, Match)  -
 read_tsv("Data/Data2/Merged_taxonomy2.tsv") -> Taxonomic_profile
 Taxonomic_profile %>% t()  %>% as.data.frame()  %>% rownames_to_column("ID") %>% as_tibble() %>% filter(! grepl("#", ID)) %>% `colnames<-`(c("ID",Taxonomic_profile$`#mOTUs2_clade`)) -> Taxonomic_profile2
 Taxonomic_profile2 %>% select(-ID) %>% apply(2, as.numeric) %>% as_tibble() %>% mutate(ID = Taxonomic_profile2$ID, .before=1) -> Taxonomic_profile2
+
+####OTUS 3.0.3 taxonomic profiles (min marker number 4) --> For replication
+read_tsv("Data/Data2/Replication/taxonomy_replication.tsv") -> Taxonomic_replication
+Taxonomic_replication %>% t()  %>% as.data.frame()  %>% rownames_to_column("ID") %>% as_tibble() %>% filter(! grepl("#", ID)) %>% `colnames<-`(c("ID",Taxonomic_replication$`#mOTUs2_clade`)) -> Taxonomic_replication2
+Taxonomic_replication2 %>% select(-ID) %>% apply(2, as.numeric) %>% as_tibble() %>% mutate(ID = Taxonomic_replication2$ID, .before=1) -> Taxonomic_replication2
+readxl::read_excel("Data/Data2/Replication/41467_2020_15457_MOESM4_ESM.xlsx") -> Cov_rep
+colnames(Cov_rep)[1] = "ID_sample"
+Names = read_tsv("Data/Data2/Replication/Change_names.tsv", col_names = F, ) -> Names_rep ; colnames(Names_rep) = c("ID", "ID_sample") 
+left_join(Cov_rep, Names_rep) -> Cov_rep
+Cov_rep %>% select(ID, Age,  `Gender\r\n(1:male, 2:female)`, `BMI...8`, Group) %>% mutate(Status =  ifelse(Group=="HC", 0, 1) ) %>% rename(Sex=`Gender\r\n(1:male, 2:female)`, BMI=`BMI...8` ) -> Cov_rep
+read_csv("Data/Data2/Replication/Replication_kneaddata_reads_stats.csv") %>% rename(ID = Sample) -> reads_replication
+left_join(Cov_rep , reads_replication %>%  dplyr::rename(Reads_raw =`Raw reads (p1)`, Reads_clean=`Final (p1)`, Reads_human=`Contaminants (p1)`) %>% select(ID, Reads_clean, Reads_raw, Reads_human) ) -> Cov_rep
+
+
+#### replication using DMP participants with SZ or BPD
+read_tsv("Data/Data2/Replication2/Merged_replication2.tsv") -> Taxonomic_replication_DMP
+Taxonomic_replication_DMP %>% t()  %>% as.data.frame()  %>% rownames_to_column("ID") %>% as_tibble() %>% filter(! grepl("#", ID)) %>% `colnames<-`(c("ID",Taxonomic_replication_DMP$`#mOTUs2_clade`)) -> Taxonomic_replication_DMP2
+Taxonomic_replication_DMP2 %>% select(-ID) %>% apply(2, as.numeric) %>% as_tibble() %>% mutate(ID = Taxonomic_replication_DMP2$ID, .before=1) -> Taxonomic_replication_DMP2
+read_csv("Data/Data2/Replication2/Stats_knead.csv") %>% rename(ID = Sample) -> reads_replication2
+tibble(ID = Taxonomic_replication_DMP2$ID,  Age = 0, Sex=0, BMI=0, Status=1 ) %>% left_join(. , reads_replication2 %>%  dplyr::rename(Reads_raw =`Raw reads (p1)`, Reads_clean=`Final (p1)`, Reads_human=`Contaminants (p1)`) %>% select(ID, Reads_clean, Reads_raw, Reads_human)   ) -> Cov_rep2
+
+
 ##0.4 Merge taxonomy table and metadata
 Taxonomic_profile2 %>% filter(ID %in% c(Covariates_GUTS$Sequencing_ID, Covariates_control$Sequencing_ID) ) -> Taxonomic_profile3
 ##0.5 Selection of replicates: take the one with more alpha diversity 
@@ -194,19 +218,30 @@ Select_taxonomy_level = function(Data, Pattern){
   Data[grepl(Pattern, New_names)] -> Data
   return(Data)
 }
+Do_CLR_all_taxonomy = function(Data){
+  Compute_CLR_taxonomy(Data, Taxonomy = "s", Do_pseudo = T, Keep_column = "") -> Species_data
+  All_taxonomy = Species_data
+  for (i in c("p", "c", "o", "f", "g")){
+    Compute_CLR_taxonomy(Data, Taxonomy = i, Do_pseudo = T, Keep_column = "") -> Transformed_data
+    left_join(All_taxonomy, Transformed_data, by = "ID") -> All_taxonomy
+  }    
+  All_taxonomy <- Map(function(x) replace(x, is.infinite(x), NA), All_taxonomy) %>% as_tibble()
+  Species_data <- Map(function(x) replace(x, is.infinite(x), NA), Species_data) %>% as_tibble()
+  return(list(All_taxonomy, Species_data))
+}
 
-Compute_CLR_taxonomy(Data, Taxonomy = "s", Do_pseudo = T, Keep_column = "") -> Species_data
-All_taxonomy = Species_data
-for (i in c("p", "c", "o", "f", "g")){
-  Compute_CLR_taxonomy(Data, Taxonomy = i, Do_pseudo = T, Keep_column = "") -> Transformed_data
-  left_join(All_taxonomy, Transformed_data, by = "ID") -> All_taxonomy
-}    
-All_taxonomy <- Map(function(x) replace(x, is.infinite(x), NA), All_taxonomy) %>% as_tibble()
-Species_data <- Map(function(x) replace(x, is.infinite(x), NA), Species_data) %>% as_tibble()
+#CLR on data
+Do_CLR_all_taxonomy(Data) -> Data_CLR
+All_taxonomy = Data_CLR[[1]] ; Species_data = Data_CLR[[2]]
+#CLR on validation
+Do_CLR_all_taxonomy(Taxonomic_replication2) -> Data_CLR_replication1
+Do_CLR_all_taxonomy(Taxonomic_replication_DMP2) -> Data_CLR_replication2
+
+
 
 ##1.3 Beta diversity
 ###Compute beta diversity at the species level
-Beta_taxonomy = function(Data_t, Data_c, Data, Meta = "Reads_clean"){
+Beta_taxonomy = function(Data_t, Data_c, Data, Meta = "Reads_clean", Distance="robust_ait"){
   "s__" -> Ta
   colnames(select(Data, -c("ID"))) -> Taxa
   Taxa[grepl(Ta, Taxa)] -> Taxa
@@ -214,8 +249,11 @@ Beta_taxonomy = function(Data_t, Data_c, Data, Meta = "Reads_clean"){
   
   
   #Compute diversity
-  vegdist(select(Data_taxonomy, -c(ID)), method = "robust.aitchison") -> Beta_diversity
-  
+  if (Distance == "robust_ait"){
+    vegdist(select(Data_taxonomy, -c(ID)), method = "robust.aitchison") -> Beta_diversity
+  } else {
+    vegdist(select(Data_taxonomy, -c(ID)), method = "euclidean") -> Beta_diversity
+  }
   
   Compare_BetaDiv = F
   #Comparison of beta divesities using different metrics
@@ -261,7 +299,11 @@ Beta_taxonomy = function(Data_t, Data_c, Data, Meta = "Reads_clean"){
   #PCOA cases only
   print("Computing PCoA with only cases")
   Data %>% filter(ID %in%  (Data_c %>% filter(Status==1))$ID ) ->Data_cases
+  if (Distance == "robust_ait"){
   vegdist(select(Data_cases, -ID), method = "robust.aitchison") -> Beta_diversity2
+  } else {
+    vegdist(select(Data_cases, -ID), method = "euclidean") -> Beta_diversity2
+  }
   pcoa(Beta_diversity2) -> summary_pcoa2
   PCs2 = as_tibble(summary_pcoa2$vectors)
   Variab2 = as_tibble(summary_pcoa2$values %>% rownames_to_column("PC") )
@@ -291,37 +333,70 @@ Beta_taxonomy = function(Data_t, Data_c, Data, Meta = "Reads_clean"){
   adonis2(Beta_diversity2 ~  Data_m$Reads_clean + Data_m$Batch  , permutations = 5000) %>% print()
   
 }
+Do_beta_validation = function(Data, Data_r1=Taxonomic_replication2, Data_r2=Taxonomic_replication_DMP2, Cov=Covariates_all, Cov_r1=Cov_rep, Cov_r2=Cov_rep2){
+  ###Beta diversity replication
+  Data %>% select(-ID) %>% Comp_Prevalence() -> Prevalence_guts
+  Data_r1 %>% select(-ID) %>% Comp_Prevalence() -> Prevalence_replication
+  Data_r2 %>% select(-ID) %>% Comp_Prevalence() -> Prevalence_replication2
+  
+  ###Not the same taxonomy detected, so we keep only taxa seen in both
+  full_join(Prevalence_replication, Prevalence_guts, by="Bug", suffix = c("_guts", "_validation") ) %>% drop_na() -> Prevalence_replication
+  Prevalence_replication %>% ggplot(aes(x=Prevalence_guts, y=Prevalence_validation)) + geom_point() +theme_bw()+ geom_abline()
+  Prevalence_replication %>% filter(! (Prevalence_guts == 0 | Prevalence_validation == 0) ) -> Prevalence_replication
+  
+  rbind(select(Data, c("ID", Prevalence_replication$Bug)) , select(Data_r1, c("ID", Prevalence_replication$Bug)) ) -> Data_integrated
+  
+  #Include second validation
+  Prevalence_replication$Bug[Prevalence_replication$Bug %in%  colnames(Taxonomic_replication_DMP2) ] -> Bugs_rep2
+  select(Data_integrated, c("ID", Bugs_rep2)) %>% rbind(. , select(Taxonomic_replication_DMP2, c("ID", Bugs_rep2)) ) -> Data_integrated2
+  
+  #Beta diversity using only the first validation
+  rbind(Cov_rep %>%select(-Group) %>% mutate(Batch="Zhu"), Cov %>% rename(ID = Sequencing_ID)  %>% mutate(Batch="GUTS+DMP") ) -> Cov_integrated
+  Beta_taxonomy(NA, Data_c = left_join(Data_integrated,Cov_integrated) , Data_integrated, Meta="Batch")
+  #Beta diversity using both validations
+  rbind( Cov_rep %>%select(-Group) %>% mutate(Batch="Zhu") ,
+         Cov %>% rename(ID = Sequencing_ID)  %>% mutate(Batch = ifelse( Status == 1,"GUTS", "DMP")) ) %>% 
+    rbind( . , mutate(Cov_r2, Batch="DMP") ) %>% filter(ID %in% Data_integrated2$ID ) -> Cov_integrated2
+  Beta_taxonomy(NA, Data_c = left_join(Data_integrated2,Cov_integrated2) , Data_integrated2, Meta="Batch")
+}
 Beta_taxonomy(Species_data, Data_c, Data, Meta="Reads_clean")
+Do_beta_validation(Data)
 
 ##1.4 Alpha diversity
 ###Compute alpha diversity at the species level ; need to do this in non-transformed data
-Alpha_taxonomy = function(Data, Data_c, Taxonomy = "s", Meta = Covariates_all, Remove_names = c("ID", "UNKNOWN"), Cov_name=c("Reads_clean") ){
+Alpha_taxonomy = function(Data, Data_c, Taxonomy = "s", Meta = Covariates_all, Remove_names = c("ID", "UNKNOWN"), Cov_name=c("Reads_clean"), Check_batch=T ){
   paste( c(Taxonomy, "__"), collapse="" ) -> Ta
   colnames(select(Data, -one_of(Remove_names))) -> Taxa
   Select_taxonomy_level(Taxa, Ta) -> Taxa
   Data %>% select(Taxa)  -> Data_taxonomy
   diversity(Data_taxonomy, "shannon" ) -> Diversity
-  Data_c %>% select(c("ID", "Status", "Batch", Cov_name)) %>% mutate(Diversity = Diversity) -> Data_div
+  Data_c %>% select( one_of(c("ID", "Status", "Batch", Cov_name))) %>% mutate(Diversity = Diversity) -> Data_div
 
   Formula = as.formula(paste0("Diversity ~ Status +", paste(Cov_name, collapse=" + ") ))
   summary(lm(Formula,Data_div)) %>% print()
-  summary(lm( as.formula(paste0("Diversity ~ Batch +",paste(Cov_name, collapse=" + ") ))  ,filter(Data_div, Status == 1 ) )) %>% print()
-  
   
   ggplot(Data_div, aes(x=as.factor(Status), y=Diversity, col=as.factor(Status)))  + geom_violin() +
   theme_bw() + coord_flip() + geom_jitter() +
     stat_summary(fun = "median",geom = "crossbar", aes(color = as.factor(Status))) +
     stat_summary(fun = "mean", geom = "point", color= "black") + ggtitle("Disease differences") -> Plot1
   
+  if (Check_batch ==T){
+  print("Running for batches, if no batches, this will fail")
+  summary(lm( as.formula(paste0("Diversity ~ Batch +",paste(Cov_name, collapse=" + ") ))  ,filter(Data_div, Status == 1 ) )) %>% print()
   ggplot( filter(Data_div, Status==1) , aes(x=as.factor(Batch), y=Diversity, col=as.factor(Batch)))  + geom_violin() +
     theme_bw() + coord_flip() + geom_jitter() +
     stat_summary(fun = "median",geom = "crossbar", aes(color = as.factor(Batch))) +
     stat_summary(fun = "mean", geom = "point", color= "black")  + ggtitle("Batch differences (GUTS)")-> Plot2
   
   return(list(Plot1, Plot2))
+  }
+  else ( return(Plot1) )
   
 }
-Alpha_taxonomy(Data, Data_c, "s")
+Alpha_taxonomy(Data, Data_c, "s") ; Alpha_taxonomy(Data, Data_c, "g")
+#Validation
+Alpha_taxonomy(Taxonomic_replication2, left_join(Taxonomic_replication2, Cov_rep) , "g", Cov_name=c("Age", "Sex", "BMI"), Check_batch = F) #This is the analysis ran in the original paper, not replicated if genera and no covariates
+
 
 
 #2. Biomarker discovery
@@ -397,9 +472,9 @@ Run_balance_analysis = function(Balance_input, Info = Data_c, lambda=1, add_pseu
   if (length(model$ensemble) > 1){ 
     Numerators2 = colnames(xTrain)[getNumeratorParts(model, 2)] 
     Denominators2 = colnames(xTrain)[getDenominatorParts(model, 2)]
-    return(list(Numerators, Denominators, Numerators2, Denominators2))
+    return(list(Numerators, Denominators, Numerators2, Denominators2, Balance_input[trainIndex,]$ID))
     
-  } else { return(list(Numerators, Denominators)) }
+  } else { return(list(Numerators, Denominators,  Balance_input2[trainIndex,]$ID )) }
 }   
 
 #Get only prevalent bacteria for the model
@@ -408,8 +483,9 @@ Run_balance_analysis( select(Data, c("ID", Keep$Bug)) ) -> Balances
 #Balance using batches as different train/test sets
 #Run_balance_analysis( select(Data, c("ID", Keep$Bug)), add_pseudo = "Imput" , Strategy="Batch"  ) -> Balances2
 Balances[[4]] %>% sapply(function(x){ str_split(x, "\\|")[[1]] -> y ; y[length(y)]  } ) %>% as_vector() %>% as.vector()
-Data %>% select(Balances[[1]]) %>% apply(1, sum) -> Numerator ; Data %>% select(Balances[[3]]) %>% apply(1, sum) -> Numerator2
-Data %>% select(Balances[[2]]) %>% apply(1, sum) -> Denominator ; Data %>% select(Balances[[4]]) %>% apply(1, sum) -> Denominator2
+
+Data %>% select(Balances[[1]]) %>% apply(1, function(x){ y = x + 1; Geom_mean(y) } ) -> Numerator ; Data %>% select(Balances[[3]]) %>% apply(1, function(x){ y = x + 1; Geom_mean(y) } ) -> Numerator2
+Data %>% select(Balances[[2]]) %>% apply(1, function(x){ y = x + 1; Geom_mean(y) } ) -> Denominator ; Data %>% select(Balances[[4]]) %>% apply(1, function(x){ y = x + 1; Geom_mean(y) } ) -> Denominator2
 Data %>% mutate( Balance = log10(Numerator/Denominator), Balance2=log10(Numerator2/Denominator2), Status = Data_c$Status, Read_number=Data_c$Reads_clean ) ->Data_b
 Data_b %>% ggplot(aes(x=as.factor(Status), y= Balance, col=as.factor(Status)))  + geom_violin() + theme_bw() + coord_flip() + geom_jitter() +
   stat_summary(fun = "median",geom = "crossbar", aes(color = as.factor(Status))) + stat_summary(fun = "mean", geom = "point", color= "black")
@@ -417,6 +493,56 @@ summary(lm(Balance ~ Status + Read_number , filter( Data_b, ! abs(Balance) == In
 Data_b %>% ggplot(aes(x=as.factor(Status), y= Balance2, col=as.factor(Status)))  + geom_violin() + theme_bw() + coord_flip() + geom_jitter() +
   stat_summary(fun = "median",geom = "crossbar", aes(color = as.factor(Status))) + stat_summary(fun = "mean", geom = "point", color= "black")
 summary(lm(Balance2 ~ Status + Read_number , filter( Data_b, ! abs(Balance2) == Inf )))
+
+Data_b %>% select(ID, Balance, Balance2, Read_number) %>% write_tsv("Results/Balances.tsv")
+
+#Replication
+Comp_Prevalence( select( Taxonomic_replication2  , -ID) ) -> Prevalence_replication
+Prevalence_replication %>% filter(Bug %in% unlist(Balances[1:4]) ) %>% group_by(Prevalence>0.1) %>% summarise(n()) #19/19 found
+
+Taxonomic_replication2 %>% select( one_of(Balances[[1]])) %>% apply(1, function(x){ y = x + 1; Geom_mean(y) } ) -> Numerator ; Taxonomic_replication2 %>% select(one_of(Balances[[3]])) %>% apply(1, function(x){ y = x + 1; Geom_mean(y) } ) -> Numerator2
+Taxonomic_replication2 %>% select(one_of(Balances[[2]])) %>% apply(1, function(x){ y = x + 1; Geom_mean(y) } ) -> Denominator ; Taxonomic_replication2 %>% select(one_of(Balances[[4]])) %>% apply(1, function(x){ y = x + 1; Geom_mean(y) } ) -> Denominator2
+Taxonomic_replication2 %>% select(ID) %>% mutate(Balance = log10(Numerator/Denominator), Balance2=log10(Numerator2/Denominator2)) %>% left_join(. , Cov_rep) -> Data_b_replication
+Data_b_replication %>% ggplot(aes(x=as.factor(Status), y= Balance, col=as.factor(Status)))  + geom_violin() + theme_bw() + coord_flip() + geom_jitter() +
+  stat_summary(fun = "median",geom = "crossbar", aes(color = as.factor(Status))) + stat_summary(fun = "mean", geom = "point", color= "black")
+summary(lm(Balance ~ Status + Age + Sex , filter( Data_b_replication, ! abs(Balance) == Inf )))
+Data_b_replication %>% ggplot(aes(x=as.factor(Status), y= Balance2, col=as.factor(Status)))  + geom_violin() + theme_bw() + coord_flip() + geom_jitter() +
+  stat_summary(fun = "median",geom = "crossbar", aes(color = as.factor(Status))) + stat_summary(fun = "mean", geom = "point", color= "black")
+summary(lm(Balance2 ~ Status + Age + Sex  , filter( Data_b_replication, ! abs(Balance2) == Inf )))
+
+#Replication with DMP
+Comp_Prevalence( select( Taxonomic_replication_DMP2  , -ID) ) -> Prevalence_replication2
+Prevalence_replication2 %>% filter(Bug %in% unlist(Balances[1:4]) ) %>% group_by(Prevalence>0.1) %>% summarise(n()) #19/19 found
+
+Taxonomic_replication_DMP2 %>% select( one_of(Balances[[1]])) %>% apply(1, function(x){ y = x + 1; Geom_mean(y) } ) -> Numerator ; Taxonomic_replication_DMP2 %>% select(one_of(Balances[[3]])) %>% apply(1, function(x){ y = x + 1; Geom_mean(y) } ) -> Numerator2
+Taxonomic_replication_DMP2 %>% select(one_of(Balances[[2]])) %>% apply(1, function(x){ y = x + 1; Geom_mean(y) } ) -> Denominator ; Taxonomic_replication_DMP2 %>% select(one_of(Balances[[4]])) %>% apply(1, function(x){ y = x + 1; Geom_mean(y) } ) -> Denominator2
+Taxonomic_replication_DMP2 %>% select(ID) %>% mutate(Balance = log10(Numerator/Denominator), Balance2=log10(Numerator2/Denominator2)) %>% mutate(Status=2) -> Data_b_replicationDMP
+Data_b %>% select(ID, Balance, Balance2, Status) %>% rbind(. , Data_b_replicationDMP) -> Data_b_replicationDMP
+lm(Balance2 ~ as.factor(Status), filter( Data_b_replicationDMP, ! abs(Balance2) == Inf ),contrasts = matrix(c(1, -1/2, -1/2, 0, .5, -.5), ncol = 2)
+ ) %>% summary()
+lm(Balance ~ as.factor(Status), filter( Data_b_replicationDMP, ! abs(Balance2) == Inf ) ) %>% summary()
+Data_b_replicationDMP %>% ggplot(aes(x=as.factor(Status), y= Balance2, col=as.factor(Status)))  + geom_violin() + theme_bw() + coord_flip() + geom_jitter() +
+  stat_summary(fun = "median",geom = "crossbar", aes(color = as.factor(Status))) + stat_summary(fun = "mean", geom = "point", color= "black") + scale_color_manual(values=met.brewer("Manet", 5)[c(1,5, 3)] )
+
+Data_b_replicationDMP %>% mutate( Cohort = ifelse(Status == 0 | Status== 2, "DMP", "GUTS" ), Status = ifelse(Status==2, 1, Status)  ) %>% rbind(. , select(Data_b_replication, c(ID, Balance, Balance2, Status)) %>% mutate(Cohort = "Zhu")) -> Data_b_all
+
+Data_b_all %>% lmerTest::lmer(Balance2 ~   Status + (1|Cohort) , . ) %>% summary()
+Data_b_all %>% lmerTest::lmer(Balance ~  Status + (1|Cohort) , . ) %>% summary()
+
+Data_b_all%>% filter(! is.infinite(Balance2) | is.na(Balance2) ) %>% mutate(Status= as.factor(Status)) %>% ggplot(aes(y=Balance2, x= Status, col=Cohort ))  + geom_violin() + theme_bw()  + ggforce::geom_sina() +
+  stat_summary(fun = "mean", geom = "point", color= "black") + scale_color_manual(values=met.brewer("Manet", 5)[c(1,5, 3)] ) + 
+  stat_summary(aes(group = factor(paste0(Status, Cohort)), color=Cohort) ,fun = "median",geom = "crossbar")
+#Removing training (saved in Balances[[5]])
+Data_b_all %>% filter(! ID %in% Balances[[5]]) %>% lmerTest::lmer(Balance2 ~  Cohort + Status + (1|Cohort) , . ) %>% summary()
+Data_b_all%>% filter(! ID %in% Balances[[5]]) %>% filter(! is.infinite(Balance2) | is.na(Balance2) ) %>% mutate(Status= as.factor(Status)) %>% ggplot(aes(y=Balance2, x= Status, col=Cohort ))  + geom_violin() + theme_bw()  + ggforce::geom_sina() +
+  stat_summary(fun = "mean", geom = "point", color= "black") + scale_color_manual(values=met.brewer("Manet", 5)[c(1,5, 3)] ) + 
+  stat_summary(aes(group = factor(paste0(Status, Cohort)), color=Cohort) ,fun = "median",geom = "crossbar")
+Data_b_all%>% filter(! ID %in% Balances[[5]]) %>% filter(Cohort == "DMP") %>% lm(Balance2 ~ as.factor(Status), . ) %>% summary()
+Data_b_all%>% filter(! ID %in% Balances[[5]]) %>% filter(Cohort == "DMP") %>% lm(Balance ~ as.factor(Status), . ) %>% summary()
+
+#Conclusions:  Without training DMP alone replicates. Mixed-model with all three cohorts is also significant.
+
+
 
 #2.2 Association analysis: linear model on CLR-transformed data 
 ##Inverse-rank normal transformation, also known as INT --> enforce normality of the data. Applied after sample-specific normalization factors applied in CLR
@@ -452,7 +578,36 @@ Association_analysis = function(Prevalence, DF, Data_c, FILTER=20, Meta=c("Read_
     rbind(Total_results, results) -> Total_results
 }
   return(Total_results)
+}
+Association_analysis_all = function(Prevalence, DF, Data_c, FILTER=20, Meta=c("Read_number")) {
+  Total_results = tibble()
+  Prevalence %>% filter(N_case > FILTER & N_control > FILTER ) %>% filter(! Bug == "UNKNOWN") -> To_Test
+  for (Bug in To_Test$Bug){
+    if (! Bug %in% colnames(DF) ){ next }
+    DF %>% select( one_of(Bug) ) %>% as_vector() -> vector_Bug
+    #IF we want to normalize it, apply function here
+    normalized_Bug = Inverse_rank_normal(vector_Bug)
+    #invers rank normal transf?
+    Data_c %>% select(one_of(c("ID", "Status", "Batch", Meta))) %>% mutate(B =  vector_Bug, B_n = normalized_Bug) -> Model_input
+    Formula2 = paste(c("B_n ~ Status", Meta, "(1|Batch)"), collapse="+")
+    
+    #lm(Formula, Model_input  ) -> Model_out
+    lmerTest::lmer(Formula2, Model_input  ) -> Model_out_n
+    #If not normalized
+    #Normality = shapiro.test(Model_out$residuals)$p.value
+    #as.data.frame(summary(Model_out)$coefficients)["Status",] %>% as_tibble() %>%
+    #  mutate(Bug = Bug, Shapiro_p = Normality, .before=1) -> results
+    #Normalized
+    #Normality = shapiro.test(Model_out_n$residuals)$p.value
+    as.data.frame(summary(Model_out_n)$coefficients)["Status",] %>% as_tibble() %>%
+      mutate(Bug = Bug, .before=1) %>% rename(`Pr(>|t|)_norm`  = `Pr(>|t|)`) -> Normalized_results
+    
+    Normalized_results -> results
+    rbind(Total_results, results) -> Total_results
+  }
+  return(Total_results)
 }  
+
 Association_analysis_readNumber = function(Prevalence, DF, Data_c, FILTER=20, Meta = "Reads_clean" ){
   Total_results = tibble()
   Prevalence %>% filter(N_case > FILTER & N_control > FILTER) %>% filter(! Bug == "UNKNOWN") -> To_Test
@@ -558,6 +713,41 @@ Association_results %>% ggplot(aes(x=Estimate_norm, y= -log10(`Pr(>|t|)_norm`), 
   geom_hline( yintercept = -log10(0.05), color="red" ) + geom_point() + theme_bw() + facet_wrap(~Taxonomic_level) +
   geom_label_repel(data = Top_results %>% filter(FDR_permutation<0.05) %>% unique(),  aes(label = Bug), size=1.5, color = "black")
 
+#Run associaton with all data
+Comp_Prevalence( select( filter(Taxonomic_replication_DMP2 )  , -ID) ) -> Prevalence_replication2
+Comp_Prevalence( select( filter(Taxonomic_replication2 )  , -ID) ) -> Prevalence_replication
+filter(Prevalence, Bug %in% Prevalence_replication2$Bug & Bug %in% Prevalence_replication$Bug)   -> To_keep
+
+rbind(rbind( dplyr::select(All_taxonomy, one_of(c("ID", To_keep$Bug))) ,  dplyr::select(Data_CLR_replication1[[1]], one_of(c("ID", To_keep$Bug) ) )), dplyr::select(Data_CLR_replication2[[1]], one_of(c("ID", To_keep$Bug) ) )) -> taxa_test
+Comp_Prevalence( select( taxa_test, -ID) ) -> Prevalence_all
+rbind(rbind(Covariates_all %>% rename(ID = Sequencing_ID) %>% mutate(Batch = ifelse(Status==1, "GUTS", "DMP"  )) , Cov_rep %>% select(-Group) %>% mutate(Batch="Zhu") ), Cov_rep2 %>% mutate(Batch="DMP")) %>% arrange(ID) -> Covariates_test
+Association_results_all = Run_Associations(To_keep, taxa_test, left_join(taxa_test, Covariates_test), FILTER_n=20, Meta_n=c("Reads_clean"), Function =  Association_analysis_all, Run_permutations = T, Permutation_number=100) 
+Association_results_all %>% ggplot(aes(x=Estimate, y= -log10(`Pr(>|t|)_norm`), col=FDR_permutation<0.05 )) +
+  geom_hline( yintercept = -log10(0.05), color="red" ) + geom_point() + theme_bw() + facet_wrap(~Taxonomic_level) +
+  geom_label_repel(data = Association_results_all %>% filter(FDR_permutation<0.05) %>% unique(),  aes(label = Bug), size=1.5, color = "black")
+Association_results_all %>% filter(FDR_permutation < 0.05) %>% View()
+
+
+
+#Batch correction using PLSDAbatch
+library(PLSDAbatch)
+
+#PLSDAbatch without sparsity... Probably overfitted
+taxa_test %>% dplyr::select(-ID) %>% as.matrix() %>%  plsda(X = ., Y = left_join(taxa_test, Covariates_test)$Status  , ncomp = 5) -> tune
+tune$prop_expl_var #1 component is enough to to explain all variability in Y
+taxa_test %>% dplyr::select(-ID) %>% as.matrix() %>% PLSDA_batch(X = .,  Y.trt = left_join(taxa_test, Covariates_test)$Status , Y.bat = left_join(taxa_test, Covariates_test)$Batch , ncomp.trt = 1, ncomp.bat = 10) -> ad.batch.tune
+ad.batch.tune$explained_variance.bat
+sum(ad.batch.tune$explained_variance.bat$Y[seq_len(2)])
+taxa_test %>% dplyr::select(-ID) %>% as.matrix() %>% PLSDA_batch(X = .,  Y.trt = left_join(taxa_test, Covariates_test)$Status , Y.bat = left_join(taxa_test, Covariates_test)$Batch , ncomp.trt = 1, ncomp.bat = 2) -> ad.PLSDA_batch.res
+ad.PLSDA_batch <- ad.PLSDA_batch.res$X.nobatch
+ad.PLSDA_batch %>% as_tibble() %>% mutate(ID=taxa_test$ID , .before=1 ) -> taxa_test_corrected
+Beta_taxonomy(NA, Data_c = left_join(taxa_test_corrected,Covariates_test) , taxa_test_corrected, Meta="Batch", Distance = "euclidean")
+
+Run_Associations(To_keep, taxa_test, left_join(taxa_test, Covariates_test), FILTER_n=20, Meta_n=c("Reads_clean"), Run_permutations = T ) -> Association_results_batchCorrected
+Association_results_batchCorrected %>% ggplot(aes(x=Estimate, y= -log10(`Pr(>|t|)_norm`), col=FDR_permutation<0.05 )) +
+  geom_hline( yintercept = -log10(0.05), color="red" ) + geom_point() + theme_bw() + facet_wrap(~Taxonomic_level) +
+  geom_label_repel(data = Association_results_all %>% filter(FDR_permutation<0.05) %>% unique(),  aes(label = Bug), size=1.5, color = "black")
+
 
 ##2.2.3 Run association analysis between disease and gut taxa using Aldex2
 Aldex_results = tibble()
@@ -589,68 +779,154 @@ Aldex_results %>% left_join(. ,Balances_results) %>% ggplot(. , aes(x=effect, y=
   geom_label_repel(data = . %>% filter(wi.eBH<0.05) %>% unique(),  aes(label = Bug), size=1.5, color = "black")
 
 left_join(Association_results, Aldex_results, by = c("Bug", "Taxonomic_level")) %>% left_join(., Prevalence) %>%
-    write_tsv( ., "Results/Summary_statistics_TaxonomyAnalysis.csv")  
+    write_tsv( ., "Results/Summary_statistics_TaxonomyAnalysis.tsv")  
 
 
-
-Old_pathway = function(){
-
-  ######################
-  ## Pathway analysis###
-  ######################
+###Replication
+Taxonomic_replication2 %>% select(one_of(c("ID", Aldex_results$Bug))) %>% arrange(ID) -> replication_for_aldex
+#Taxonomic_replication2 %>%arrange(ID) -> replication_for_aldex
+Cov_rep %>% arrange(ID) %>% filter(ID %in% Taxonomic_replication2$ID) -> Cov_rep
+Aldex_replication = tibble()
+for (Taxonomic_level in c("p", "c", "o", "f", "g", "s")){
+  print( paste0("Subsetting features of taxonomic level: ", Taxonomic_level) )
+  paste(c(Taxonomic_level, "__"), collapse="" ) -> Ta
   
-  #Get prevalences
-  Comp_Prevalence( select(Case_ptw, -ID) ) -> Prevalence_cases_ptw
-  Comp_Prevalence( select(Control_ptw, -ID) ) -> Prevalence_controls_ptw
-  full_join(Prevalence_cases_ptw, Prevalence_controls_ptw, by="Bug", suffix = c("_case", "_control") ) %>% drop_na() -> Prevalence_ptw
+  colnames(dplyr::select(replication_for_aldex, - one_of(c("ID" )))) -> Taxa
+  Select_taxonomy_level(Taxa, Ta) -> Taxa
   
-  #Prepare data
-  rbind( select(Control_ptw, c(ID, Prevalence_ptw$Bug) ), select(Case_ptw, c(ID, Prevalence_ptw$Bug) ))  -> Data_ptw
-  Data_ptw %>% select(-ID) %>% apply(2, as.numeric) %>% as.data.frame() %>% mutate(ID = Data_ptw$ID) -> Data_ptw
+  replication_for_aldex %>% dplyr::select( one_of(c("ID", Taxa) ))  -> Data_taxonomyX
+  Data_taxonomyX %>% as.data.frame() %>% column_to_rownames("ID") %>% t() -> Input_aldex
+  print("Calling association function" )
+  x <- ALDEx2::aldex.clr(Input_aldex, as.character(as.factor(Cov_rep$Status)), mc.samples=160, denom="all", verbose=FALSE)
+  x.tt <- ALDEx2::aldex.ttest(x, paired.test=FALSE, verbose=FALSE)
+  x.effect <- ALDEx2::aldex.effect(clr = x, CI=T, verbose=FALSE )
   
-  Data_ptw %>% mutate(Cohort = ifelse(grepl("LL", ID), "Control", "Case" )) -> Data_c_ptw
-  Data_c_ptw$Cohort = factor(Data_c_ptw$Cohort, levels= c("Control", "Case"))
-  
-  
-  #Prediction## Using only fully prevalent taxa
-  Prevalence_ptw %>% filter(Prevalence_case == 1 & Prevalence_control == 1) %>% filter(! Bug %in% c("UNMAPPED", "UNINTEGRATED")) -> Keep_ptw
-  Run_balance_analysis( Balance_input = select(Data_ptw, c("ID", Keep_ptw$Bug)) , Labels = Data_c_ptw$Cohort, lambda= 1, add_pseudo = F  ) -> Balances_ptw
-  Data_ptw %>% select(Balances_ptw[[1]]) %>% apply(1, sum) -> Numerator_ptw ; Data_ptw %>% select(Balances_ptw[[3]]) %>% apply(1, sum) -> Numerator2_ptw ; Data_ptw %>% select(Balances_ptw[[2]]) %>% apply(1, sum) -> Denominator_ptw ; Data_ptw %>% select(Balances_ptw[[4]]) %>% apply(1, sum) -> Denominator2_ptw
-  Data_ptw %>% mutate( Balance = log10(Numerator_ptw/Denominator_ptw), Balance2 = log10(Numerator2_ptw/Denominator2_ptw), Cohort = Data_c_ptw$Cohort ) -> Data_b_ptw
-  Data_b_ptw %>% ggplot(aes(x=Cohort, y= Balance, col=Cohort))  + geom_violin() + theme_bw() + coord_flip() + geom_jitter() + stat_summary(fun = "median",geom = "crossbar", aes(color = Cohort)) + stat_summary(fun = "mean", geom = "point", color= "black") 
-  Data_b_ptw %>% ggplot(aes(x=Cohort, y= Balance2, col=Cohort))  + geom_violin() + theme_bw() + coord_flip() + geom_jitter() + stat_summary(fun = "median",geom = "crossbar", aes(color = Cohort)) + stat_summary(fun = "mean", geom = "point", color= "black")
-  
-  #Linear model
-  Compute_CLR_taxonomy(Data_ptw, Keep_column = c("UNMAPPED", "UNINTEGRATED")) -> Data_ptw2
-  Association_analysis( Prevalence_ptw, Data_ptw2, Data_c_ptw, Meta=Read_number ,FILTER=30) -> Association_results_ptw
-  
-  #Check if association results are reproduced in the Balance analysis 
-  Balances_results_ptw = tibble(Bug = unique(c(Balances_ptw[[1]], Balances_ptw[[3]])), Direction_balance = "Positive")
-  Balances_results_ptw = rbind(Balances_results_ptw, tibble(Bug = unique(c(Balances_ptw[[2]], Balances_ptw[[4]])), Direction_balance = "Negative") )
-  #2/4 bugs in balances are nominally significant
-  left_join(Association_results_ptw,Balances_results_ptw) -> Association_results_ptw
-  
-  #Permutations
-  Null_distribution_ptw= c()
-  for (Permutation_n in seq(Permutation_number) ){
-    Data_perm = Data_c_ptw
-    Data_perm$Cohort = sample(Data_c_ptw$Cohort, replace = F,size = dim(Data_c_ptw)[1] )
-    Association_analysis(Prevalence_ptw, Data_ptw2, Data_perm, FILTER=30) -> Association_results_p
-    Null_distribution = c(Null_distribution_ptw, Association_results_p$`Pr(>|t|)_norm`)
-  }
-  
-  sapply( Association_results_ptw$`Pr(>|t|)_norm`, function(x){ sum( Null_distribution <= x  )/Permutation_number  } ) -> FDR_perm_ptw
-  FDR_perm_ptw[FDR_perm_ptw > 1] = 1
-  Association_results_ptw %>% mutate(FDR_permutation = FDR_perm_ptw ) -> Association_results_ptw
-  
-  
-  Association_results_ptw %>% ggplot(aes(x=Estimate_norm, y= -log10(`Pr(>|t|)_norm`), shape= is.na(Direction_balance) )) +
-    geom_hline( yintercept = -log10(0.05), color="red" ) + geom_point() + theme_bw() +
-    geom_label_repel(data = Top_results %>% filter(FDR_permutation<0.05) %>% unique(), 
-                     aes(label = Bug),
-                     color = "black")
-  write_tsv(Association_results_ptw, "Summary_statistics_PathwayAnalysis.csv")  
+  x.all <- data.frame(x.tt,x.effect)
+  x.all %>% rownames_to_column("Bug") %>% as_tibble() %>% mutate(Taxonomic_level = Taxonomic_level) -> Result_taxa
+  print("Association succesful" )
+  rbind(Aldex_replication, Result_taxa) -> Aldex_replication
 }
+
+#17/17 taxa are available for replication
+#1/15 reach P-value < 0.05 , Ruthenibacterium   same direction , almost significant: Actinobacteria same direction
+Aldex_replication %>% filter(Bug %in%  filter(Aldex_results, wi.eBH < 0.05)$Bug ) %>% ggplot(. , aes(x=effect, y= -log10(`wi.ep`), col=`wi.eBH`<0.05 )) +
+  geom_hline( yintercept = -log10(0.05), color="red" ) + geom_point() + theme_bw() + facet_wrap(~Taxonomic_level) +
+  geom_label_repel(data = . %>% filter(wi.ep<0.05) %>% unique(),  aes(label = Bug), size=1.5, color = "black")
+Aldex_replication %>% ggplot(. , aes(x=effect, y= -log10(`wi.ep`), col=`wi.eBH`<0.05 )) +
+  geom_hline( yintercept = -log10(0.05), color="red" ) + geom_point() + theme_bw() + facet_wrap(~Taxonomic_level) +
+  geom_label_repel(data = . %>% filter(`wi.eBH`<0.05) %>% unique(),  aes(label = Bug), size=1.5, color = "black")
+Aldex_replication %>% arrange(wi.ep) %>% filter(Taxonomic_level == "s") %>% select(Bug, wi.ep, effect)
+
+Aldex_replication_cov = tibble()
+for (Taxonomic_level in c("p", "c", "o", "f", "g", "s")){
+  print( paste0("Subsetting features of taxonomic level: ", Taxonomic_level) )
+  paste(c(Taxonomic_level, "__"), collapse="" ) -> Ta
+  
+  colnames(dplyr::select(replication_for_aldex, - one_of(c("ID" )))) -> Taxa
+  Select_taxonomy_level(Taxa, Ta) -> Taxa
+  
+  replication_for_aldex %>% dplyr::select( one_of(c("ID", Taxa) ))  -> Data_taxonomyX
+  Data_taxonomyX %>% as.data.frame() %>% column_to_rownames("ID") %>% t() -> Input_aldex
+  print("Calling association function" )
+  mm <- model.matrix(~ as.character(Status) + Sex + Age + BMI, Cov_rep)
+  x <- ALDEx2::aldex.clr(Input_aldex,mm, mc.samples=160, denom="all", verbose=FALSE)
+  glm.test <- ALDEx2::aldex.glm(x, mm)
+  glm.effect <- ALDEx2::aldex.glm.effect(x)
+  
+  x.all <- data.frame(glm.test,glm.effect)
+  x.all %>% rownames_to_column("Bug") %>% as_tibble() %>% mutate(Taxonomic_level = Taxonomic_level) -> Result_taxa
+  print("Association succesful" )
+  rbind(Aldex_replication_cov, Result_taxa) -> Aldex_replication_cov
+}
+Aldex_replication_cov %>% ggplot(. , aes(x=`model.as.character.Status.1.Estimate`, y= -log10(`model.as.character.Status.1.Pr...t..`), col=`model.as.character.Status.1.Pr...t...BH`<0.05 )) +
+  geom_hline( yintercept = -log10(0.05), color="red" ) + geom_point() + theme_bw() + facet_wrap(~Taxonomic_level) +
+  geom_label_repel(data = . %>% filter( `model.as.character.Status.1.Pr...t...BH`<0.05) %>% unique(),  aes(label = Bug), size=1.5, color = "black")
+
+#nothing significant when accounting for covariates
+Aldex_replication_cov %>% filter(Bug %in%  filter(Aldex_results, wi.eBH < 0.05)$Bug ) %>% 
+ggplot(. , aes(x=`model.as.character.Status.1.Estimate`, y= -log10(`model.as.character.Status.1.Pr...t..`), col=`model.as.character.Status.1.Pr...t...BH`<0.05 )) +
+  geom_hline( yintercept = -log10(0.05), color="red" ) + geom_point() + theme_bw() + facet_wrap(~Taxonomic_level) +
+  geom_label_repel(data = . %>% filter( `model.as.character.Status.1.Pr...t...BH`<0.05) %>% unique(),  aes(label = Bug), size=1.5, color = "black")
+
+#Compare effects
+left_join( Aldex_results %>% select(Bug, effect), Aldex_replication%>% select(Bug, effect), by="Bug", suffix=c("_Study", "_Zhu") ) %>% ggplot(aes(x=effect_Study, y=effect_Zhu)) + geom_point() + theme_bw() + geom_abline()+ geom_smooth(method = "lm")
+
+
+##check in DMP2 
+Taxonomic_replication_DMP2 %>% select(one_of(c("ID", Aldex_results$Bug))) %>% arrange(ID) -> replication_for_aldex
+#Taxonomic_replication2 %>%arrange(ID) -> replication_for_aldex
+rbind(Covariates_control, tibble(Sequencing_ID = replication_for_aldex$ID, Batch = 0, Age=0, Sex=0, BMI=0, Status=1))  -> Cov_rep
+rbind( Data %>% filter(ID %in% Cov_rep$Sequencing_ID) %>% select(one_of(colnames(replication_for_aldex))) ,  replication_for_aldex) -> replication_for_aldex
+
+Aldex_replication2 = tibble()
+for (Taxonomic_level in c("p", "c", "o", "f", "g", "s")){
+  print( paste0("Subsetting features of taxonomic level: ", Taxonomic_level) )
+  paste(c(Taxonomic_level, "__"), collapse="" ) -> Ta
+  
+  colnames(dplyr::select(replication_for_aldex, - one_of(c("ID" )))) -> Taxa
+  Select_taxonomy_level(Taxa, Ta) -> Taxa
+  
+  replication_for_aldex %>% dplyr::select( one_of(c("ID", Taxa) ))  -> Data_taxonomyX
+  Data_taxonomyX %>% as.data.frame() %>% column_to_rownames("ID") %>% t() -> Input_aldex
+  print("Calling association function" )
+  x <- ALDEx2::aldex.clr(Input_aldex, as.character(as.factor(Cov_rep$Status)), mc.samples=160, denom="all", verbose=FALSE)
+  x.tt <- ALDEx2::aldex.ttest(x, paired.test=FALSE, verbose=FALSE)
+  x.effect <- ALDEx2::aldex.effect(clr = x, CI=T, verbose=FALSE )
+  
+  x.all <- data.frame(x.tt,x.effect)
+  x.all %>% rownames_to_column("Bug") %>% as_tibble() %>% mutate(Taxonomic_level = Taxonomic_level) -> Result_taxa
+  print("Association succesful" )
+  rbind(Aldex_replication2, Result_taxa) -> Aldex_replication2
+}
+
+# 3 / 17 are replicated ( g__Odoribacter, g__Clostridiales, s__Odoribacter, f__Odoribacteraceae   )
+Aldex_replication2 %>% filter(Bug %in%  filter(Aldex_results, wi.eBH < 0.05)$Bug ) %>% ggplot(. , aes(x=effect, y= -log10(`wi.ep`), col=`wi.eBH`<0.05 )) +
+  geom_hline( yintercept = -log10(0.05), color="red" ) + geom_point() + theme_bw() + facet_wrap(~Taxonomic_level) +
+  geom_label_repel(data = . %>% filter(wi.ep<0.05) %>% unique(),  aes(label = Bug), size=1.5, color = "black")
+
+
+left_join( Aldex_results %>% select(Bug, effect), Aldex_replication2%>% select(Bug, effect), by="Bug", suffix=c("_Study", "_validation") ) %>% ggplot(aes(x=effect_Study, y=effect_validation)) + geom_point() + theme_bw() + geom_abline()+ geom_smooth(method = "lm")
+
+
+#X. Compare Gut-brain modules
+read_tsv("Data/Data2/GBM_quant.tsv") -> GBM
+GBM[is.na(GBM)] = 0
+GBM %>% select(-ID)  %>% apply(1, function(x) { CLR(x+1)  }) %>% t() %>% as_tibble() %>% mutate(ID = GBM$ID) -> GBM
+
+GBM_associaton = function(GBM, Covariates_all){
+  GBM %>% left_join(dplyr::rename(Covariates_all, ID=Sequencing_ID), by="ID") -> GBM_test
+  Results_gbm = tibble()
+  for (Module in colnames(GBM)){
+    if (Module == "ID"){ next }
+    Formula = paste0( Module, " ~ Status + Reads_clean"  )
+    lm(Formula, GBM_test) %>% summary() -> result
+    as.data.frame(result$coefficients)["Status",] %>% as_tibble() %>% mutate(Module = Module) %>% rbind(Results_gbm, .) -> Results_gbm
+  }
+  return(Results_gbm)
+}
+GBM_associaton(GBM, Covariates_all) -> Results_gbm
+Null_gbm = tibble()
+N_perm = 100
+#Permutations
+for (i in seq(1:N_perm)){
+  sample(Covariates_all$Sequencing_ID, length(Covariates_all$Sequencing_ID), replace = F) -> NID
+  Covariates_perm = Covariates_all
+  Covariates_perm$Sequencing_ID = NID
+  GBM_associaton(GBM, Covariates_perm) -> Permuted
+  rbind(Null_gbm, Permuted) -> Null_gbm
+}
+FDR_p = c()
+for (P in Results_gbm$`Pr(>|t|)`){
+  FDR_p = c(FDR_p, sum(Null_gbm$`Pr(>|t|)` <= P )/N_perm)
+}
+FDR_p[FDR_p > 1] = 1
+Results_gbm %>% mutate(FDR_p = FDR_p) %>% arrange(`Pr(>|t|)`) -> Results_gbm
+Results_gbm %>% ggplot(aes(x=Estimate, y=-log10(`Pr(>|t|)`), col=FDR_p<0.05 )) + geom_point() + geom_hline(yintercept = -log10(0.05)) + theme_bw() +
+  geom_label_repel(data = . %>% filter( FDR_p<0.05) %>% unique(),  aes(label = Module), size=1.5, color = "black")
+#MGB052	Butyrate synthesis I --> significantly reduced 
+#MGB048	Propionate synthesis I --> increased
+#MGB022	GABA synthesis III --> decreased
+#MGB054	Propionate synthesis II --> increased
 
 
 
@@ -711,10 +987,10 @@ Node_stats %>% filter(DelBet>Between_stats[5] & `NESH-score`>NESH_stats[5]) %>% 
 
 #4. Subspecies level analysis
 
-Subspecies_analysis = function(File, Distance="mann", FILTER=10){
+Subspecies_analysis = function(File, Distance="mann", FILTER=10, Covariates_all = Covariates_all, P = "Data/Data2/metasnv_distances-m2-d5-b80-c5-p0.9/"){
   #if (! Distance == "mann" ){ Distance = "allele" }
   
-  File_path = paste0("Data/Data2/metasnv_distances-m2-d5-b80-c5-p0.9/", File)
+  File_path = paste0(P, File)
   mOTU = str_replace(File, paste0(".filtered.",Distance,".dist"), "")
   read.table(File_path, header = TRUE, check.names = F, sep = "\t", row.names = 1) -> Distance_matrix
   rownames(Distance_matrix) %>% sapply(., function(x){str_split(x,".bam")[[1]][1] } ) %>%as.vector() -> Sample_names 
@@ -742,6 +1018,9 @@ Subspecies_analysis = function(File, Distance="mann", FILTER=10){
 
 
 read_delim("Data/Data2/metasnv_distances-m2-d5-b80-c5-p0.9/Number_samples_distance.txt", delim=" ", col_names = F) -> Samples_discovery
+read_delim("Data/Data2/distances-m2-d5-b80-c5-p0.9_withRep/Number_samples_distance.txt", delim=" ", col_names = F) %>% mutate(X1 = as.numeric(X1)) -> Samples_discovery
+
+
 Samples_discovery %>% mutate(X1 = as.numeric(X1)) %>% filter(X1 > 10)  -> Manhattan_to_check
 
 Permanova_stats= tibble()
@@ -750,12 +1029,13 @@ for (File in Manhattan_to_check$X2){
   } else {
     D = "mann"
   }
-  Subspecies_analysis(File, Distance=D, FILTER=5) -> Res
+  print(File)
+  Subspecies_analysis(File, Distance=D, FILTER=5, Covariates_all = Cov_integrated %>% rename(Sequencing_ID  = ID), P="Data/Data2/distances-m2-d5-b80-c5-p0.9_withRep/" ) -> Res
   Res[[1]] %>% rbind(Permanova_stats, . ) -> Permanova_stats
   
 }
-sapply(Permanova_stats$mOTU, function(x){ colnames(Data)[grepl( x, colnames(Data) )] }) -> Names
-Permanova_stats %>% mutate(Taxa = Names) %>% arrange(Stat) -> Permanova_stats
+sapply(Permanova_stats$mOTU, function(x){ y = colnames(Data)[grepl( x, colnames(Data) )] ; if (length(y)==0){ return(NA) }else{ return(y) }   }) -> Names
+Permanova_stats %>% mutate(Taxa = unlist(Names)) %>% arrange(Stat) -> Permanova_stats
 Permanova_stats %>% filter(Distance == "allele") %>% mutate(FDR = p.adjust(Stat, "fdr"))
 #Nominal significance evidence of subspecies differences:
 # s__Sutterella species incertae sedis [meta_mOTU_v3_13005]
