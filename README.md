@@ -1,8 +1,8 @@
 # GUTS_MGS_Psych
 Analysis scripts GUTS project. Metagenomics shotgun sequencing association with psychiatric patients.
 
-##Software
-###Data generation and processing
+## Software  
+### Data generation and processing  
 * (for running .smk file) Snakemake v7.12.0, python v3.1
 * (for data cleaning) kneaddata v0.10.0 , Bowtie2 v2.2.5, trimmomatic v0.39-2, human ref for mapping: hg37dec_v0.1
 * (taxonomic assingment) motus v3.0.3, python v3.7.15 , SAMtools v1.10, BWA v0.7.17
@@ -18,7 +18,7 @@ Analysis scripts GUTS project. Metagenomics shotgun sequencing association with 
 * (for bulding the network) SparCC (v0.1.0)
 * (for analyzing networks) Netshift webapp
 
-###Datasets
+###Datasets  
 1. GUTS study participants
 2. DMP study participants matched to GUTS (age, sex, bmi, socieconomical status) with no dieases
 3. (validation 1) Zhu et al. schizophrenia pateitns and healthy controls. ENA accesion: PRJEB29127
