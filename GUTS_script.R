@@ -730,7 +730,7 @@ Association_results_all %>% filter(FDR_permutation < 0.05) %>% View()
 
 
 #Batch correction using PLSDAbatch
-library(PLSDAbatch)
+library(2)
 
 #PLSDAbatch without sparsity... Probably overfitted
 taxa_test %>% dplyr::select(-ID) %>% as.matrix() %>%  plsda(X = ., Y = left_join(taxa_test, Covariates_test)$Status  , ncomp = 5) -> tune
@@ -927,6 +927,10 @@ Results_gbm %>% ggplot(aes(x=Estimate, y=-log10(`Pr(>|t|)`), col=FDR_p<0.05 )) +
 #MGB048	Propionate synthesis I --> increased
 #MGB022	GABA synthesis III --> decreased
 #MGB054	Propionate synthesis II --> increased
+read_tsv("Data/Data2/Annotation_GBM.tsv", col_names = F) -> Annotation
+colnames(Annotation) = c("Module","Annotation")
+left_join(Results_gbm, Annotation) -> Results_gbm
+write_tsv(Results_gbm, "Results/Sumamry_stats_GBM.tsv")
 
 
 
