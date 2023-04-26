@@ -405,6 +405,81 @@ Alpha_taxonomy(Taxonomic_replication2, left_join(Taxonomic_replication2, Cov_rep
 library(codacore)
 library(tensorflow)
 library(pROC)
+
+predict.codacore = function(object, newx, asLogits=TRUE, numLogRatios=NA, ...) {
+  # Throw an error if zeros are present
+  if (any(newx == 0)) {
+    if (object$logRatioType == 'A') {
+      warning("The data contain zeros. An epsilon is used to prevent divide-by-zero errors.")
+    } else if (object$logRatioType == 'B') {
+      stop("The data contain zeros. Balances cannot be used in this case.")
+    }
+  }
+  
+  x = .prepx(newx)
+  yHat = rep(0, nrow(x))
+  
+  if (is.na(numLogRatios)) {
+    numLogRatios = length(object$ensemble)
+  }
+  
+  for (i in 1:numLogRatios) {
+    cdbl = object$ensemble[[i]]
+    yHat = yHat + object$shrinkage * predict.CoDaBaseLearner(cdbl, x)
+  }
+  
+  if (object$objective == 'binary classification') {
+    if (asLogits) {
+      return(yHat)
+    } else {
+      return(1 / (1 + exp(-yHat)))
+    }
+  } else if (object$objective == 'regression') {
+    return(yHat * object$yScale + object$yMean)
+  }
+}
+.prepx = function(x) {
+  if (class(x)[1] == 'tbl_df') {x = as.data.frame(x)}
+  if (class(x)[1] == 'data.frame') {x = as.matrix(x)}
+  if (is.integer(x)) {x = x * 1.0}
+  
+  # If the data is un-normalized (e.g. raw counts),
+  # we normalize it to ensure our learning rate is well calibrated
+  x = x / rowSums(x)
+  return(x)
+}
+predict.CoDaBaseLearner = function(cdbl, x, asLogits=TRUE) {
+  logRatio = computeLogRatio.CoDaBaseLearner(cdbl, x)
+  eta = cdbl$slope * logRatio + cdbl$intercept
+  if (asLogits) {
+    return(eta)
+  } else {
+    if (cdbl$objective == 'regression') {
+      stop("Logits argument should only be used for classification, not regression.")
+    }
+    return(1 / (1 + exp(-eta)))
+  }
+}
+computeLogRatio.CoDaBaseLearner = function(cdbl, x) {
+  
+  if (!any(cdbl$hard$numerator) | !any(cdbl$hard$denominator)) {
+    logRatio = rowSums(x * 0)
+  } else { # we have a bona fide log-ratio
+    if (cdbl$logRatioType == 'A') {
+      epsilon = cdbl$optParams$epsilonA
+      pvePart = rowSums(x[, cdbl$hard$numerator, drop=FALSE]) # drop=FALSE to keep as matrix
+      nvePart = rowSums(x[, cdbl$hard$denominator, drop=FALSE])
+      logRatio = log(pvePart + epsilon) - log(nvePart + epsilon)
+    } else if (cdbl$logRatioType == 'B') {
+      pvePart = rowMeans(log(x[, cdbl$hard$numerator, drop=FALSE])) # drop=FALSE to keep as matrix
+      nvePart = rowMeans(log(x[, cdbl$hard$denominator, drop=FALSE]))
+      logRatio = pvePart - nvePart
+    }
+  }
+  
+  return(logRatio)
+}
+
 Run_balance_analysis = function(Balance_input, Info = Data_c, lambda=1, add_pseudo = T, Strategy="Split"){
   set.seed(50)
   Labels = Data_c$Status
@@ -455,14 +530,26 @@ Run_balance_analysis = function(Balance_input, Info = Data_c, lambda=1, add_pseu
     cat("Train set AUC (model 2) =", codacoreAUC, "\n")
   }
   ##Test
-  yHat <- predict(model, newx = xTest)
-  print("Test results")
+  yHat <- predict.codacore(model, newx = xTest,asLogits = F)
+  yHat2 <- predict.codacore(model, newx = xTest, numLogRatios = 1, asLogits=F)
+  
+  print("Test results ratio 2")
   testAUC <- pROC::auc(pROC::roc(yTest, yHat, quiet=T))
   cat("Test set AUC =", testAUC, "\n")
+  print("Test results ratio 1")
+  testAUC <- pROC::auc(pROC::roc(yTest, yHat2, quiet=T))
+  cat("Test set AUC =", testAUC, "\n")
+  
   
   failure <- yHat < 0.5 ; success <- yHat >= 0.5
   yHat[failure] <- levels(yTest)[1] ; yHat[success] <- levels(yTest)[2]
-  cat("Classification accuracy on test set =", round(mean(yHat == yTest), 2))
+  cat("Classification accuracy on test set, ratio 2 =", round(mean(yHat == yTest), 2))
+  
+  failure <- yHat2 < 0.5 ; success <- yHat2 >= 0.5
+  yHat2[failure] <- levels(yTest)[1] ; yHat2[success] <- levels(yTest)[2]
+  cat("Classification accuracy on test set, ratio1 =", round(mean(yHat2 == yTest), 2))
+  
+  
   
   plot(model)
   plotROC(model)
@@ -472,9 +559,9 @@ Run_balance_analysis = function(Balance_input, Info = Data_c, lambda=1, add_pseu
   if (length(model$ensemble) > 1){ 
     Numerators2 = colnames(xTrain)[getNumeratorParts(model, 2)] 
     Denominators2 = colnames(xTrain)[getDenominatorParts(model, 2)]
-    return(list(Numerators, Denominators, Numerators2, Denominators2, Balance_input[trainIndex,]$ID))
+    return(list(Numerators, Denominators, Numerators2, Denominators2, Balance_input[trainIndex,]$ID, model))
     
-  } else { return(list(Numerators, Denominators,  Balance_input2[trainIndex,]$ID )) }
+  } else { return(list(Numerators, Denominators,  Balance_input2[trainIndex,]$ID ), model ) }
 }   
 
 #Get only prevalent bacteria for the model
@@ -497,6 +584,7 @@ summary(lm(Balance2 ~ Status + Read_number , filter( Data_b, ! abs(Balance2) == 
 Data_b %>% select(ID, Balance, Balance2, Read_number) %>% write_tsv("Results/Balances.tsv")
 
 #Replication
+        
 Comp_Prevalence( select( Taxonomic_replication2  , -ID) ) -> Prevalence_replication
 Prevalence_replication %>% filter(Bug %in% unlist(Balances[1:4]) ) %>% group_by(Prevalence>0.1) %>% summarise(n()) #19/19 found
 
@@ -514,13 +602,21 @@ summary(lm(Balance2 ~ Status + Age + Sex  , filter( Data_b_replication, ! abs(Ba
 Comp_Prevalence( select( Taxonomic_replication_DMP2  , -ID) ) -> Prevalence_replication2
 Prevalence_replication2 %>% filter(Bug %in% unlist(Balances[1:4]) ) %>% group_by(Prevalence>0.1) %>% summarise(n()) #19/19 found
 
+#Compute balances in new data
 Taxonomic_replication_DMP2 %>% select( one_of(Balances[[1]])) %>% apply(1, function(x){ y = x + 1; Geom_mean(y) } ) -> Numerator ; Taxonomic_replication_DMP2 %>% select(one_of(Balances[[3]])) %>% apply(1, function(x){ y = x + 1; Geom_mean(y) } ) -> Numerator2
 Taxonomic_replication_DMP2 %>% select(one_of(Balances[[2]])) %>% apply(1, function(x){ y = x + 1; Geom_mean(y) } ) -> Denominator ; Taxonomic_replication_DMP2 %>% select(one_of(Balances[[4]])) %>% apply(1, function(x){ y = x + 1; Geom_mean(y) } ) -> Denominator2
 Taxonomic_replication_DMP2 %>% select(ID) %>% mutate(Balance = log10(Numerator/Denominator), Balance2=log10(Numerator2/Denominator2)) %>% mutate(Status=2) -> Data_b_replicationDMP
+
+#Merge previous data and new data
 Data_b %>% select(ID, Balance, Balance2, Status) %>% rbind(. , Data_b_replicationDMP) -> Data_b_replicationDMP
-lm(Balance2 ~ as.factor(Status), filter( Data_b_replicationDMP, ! abs(Balance2) == Inf ),contrasts = matrix(c(1, -1/2, -1/2, 0, .5, -.5), ncol = 2)
- ) %>% summary()
+
+#lm(Balance2 ~ as.factor(Status), filter( Data_b_replicationDMP, ! abs(Balance2) == Inf ),contrasts = matrix(c(1, -1/2, -1/2, 0, .5, -.5), ncol = 2)
+# ) %>% summary()
+#Using both train and test data
 lm(Balance ~ as.factor(Status), filter( Data_b_replicationDMP, ! abs(Balance2) == Inf ) ) %>% summary()
+
+
+
 Data_b_replicationDMP %>% ggplot(aes(x=as.factor(Status), y= Balance2, col=as.factor(Status)))  + geom_violin() + theme_bw() + coord_flip() + geom_jitter() +
   stat_summary(fun = "median",geom = "crossbar", aes(color = as.factor(Status))) + stat_summary(fun = "mean", geom = "point", color= "black") + scale_color_manual(values=met.brewer("Manet", 5)[c(1,5, 3)] )
 
@@ -550,7 +646,7 @@ Inverse_rank_normal = function(Measurement){
   qnorm((rank(Measurement,na.last="keep")-0.5)/sum(!is.na(Measurement)))
 }
 
-Association_analysis = function(Prevalence, DF, Data_c, FILTER=20, Meta=c("Read_number")) {
+Association_analysis = function(Prevalence, DF, Data_c, FILTER=20, Meta=c("Read_number"), X = "Status") {
   Total_results = tibble()
   Prevalence %>% filter(N_case > FILTER & N_control > FILTER) %>% filter(! Bug == "UNKNOWN") -> To_Test
   for (Bug in To_Test$Bug){
@@ -559,19 +655,19 @@ Association_analysis = function(Prevalence, DF, Data_c, FILTER=20, Meta=c("Read_
     #IF we want to normalize it, apply function here
     normalized_Bug = Inverse_rank_normal(vector_Bug)
     #invers rank normal transf?
-    Data_c %>% select(one_of(c("ID", "Status", "Batch", Meta))) %>% mutate(B =  vector_Bug, B_n = normalized_Bug) -> Model_input
-    Formula = paste( c("B ~ Status", Meta), collapse = "+")
-    Formula2 = paste(c("B_n ~ Status", Meta), collapse="+")
+    Data_c %>% select(one_of(c("ID", X, "Batch", Meta))) %>% mutate(B =  vector_Bug, B_n = normalized_Bug) -> Model_input
+    Formula =   paste0(c("B ~ ", paste0(c(X, Meta) , collapse = "+")), collapse="")
+    Formula2 = paste0(c("B_n ~ ", paste0(c(X, Meta) , collapse = "+")), collapse="")
     
     lm(Formula, Model_input  ) -> Model_out
     lm(Formula2, Model_input  ) -> Model_out_n
     #If not normalized
     Normality = shapiro.test(Model_out$residuals)$p.value
-    as.data.frame(summary(Model_out)$coefficients)["Status",] %>% as_tibble() %>%
+    as.data.frame(summary(Model_out)$coefficients)[X,] %>% as_tibble() %>%
       mutate(Bug = Bug, Shapiro_p = Normality, .before=1) -> results
     #Normalized
     Normality = shapiro.test(Model_out_n$residuals)$p.value
-    as.data.frame(summary(Model_out_n)$coefficients)["Status",] %>% as_tibble() %>%
+    as.data.frame(summary(Model_out_n)$coefficients)[X,] %>% as_tibble() %>%
       mutate(Bug = Bug, Shapiro_p = Normality, .before=1) -> Normalized_results
     
     left_join(results, Normalized_results, by= "Bug", suffix = c("","_norm")) -> results
@@ -637,7 +733,7 @@ Association_analysis_readNumber = function(Prevalence, DF, Data_c, FILTER=20, Me
   }
   return(Total_results)
 }  
-Run_Associations = function( Prevalence, DF, Data_c, FILTER_n=20, Meta_n=c("Reads_clean"), Function =  Association_analysis, Run_permutations = F, Permutation_number=100 ){
+Run_Associations = function( Prevalence, DF, Data_c, FILTER_n=20, Meta_n=c("Reads_clean"), Function =  Association_analysis, Run_permutations = F, Permutation_number=100, Independent="Status", Permute_p="Pr(>|t|)_norm" ){
   #Per taxonomic level, run Function and perform 100 permutations to obtain taxonomic-level-specific FDR
   Summary_statistics = tibble()
   for (Taxonomic_level in c("p", "c", "o", "f", "g", "s")){
@@ -650,8 +746,8 @@ Run_Associations = function( Prevalence, DF, Data_c, FILTER_n=20, Meta_n=c("Read
     DF %>% select( one_of(c("ID", Taxa) )) -> DF_taxonomyX
 
     print("Calling association function" )
-    Summary_statistics_taxonomyX = Function( Prevalence, DF_taxonomyX, Data_c, FILTER=FILTER_n, Meta=Meta_n )
-    Summary_statistics_taxonomyX %>% mutate(FDR_bh = p.adjust(`Pr(>|t|)_norm`, "fdr") ) -> Summary_statistics_taxonomyX
+    Summary_statistics_taxonomyX = Function( Prevalence, DF_taxonomyX, Data_c, FILTER=FILTER_n, Meta=Meta_n, X=Independent )
+    Summary_statistics_taxonomyX %>% mutate(FDR_bh =p.adjust(`Pr(>|t|)`, "fdr") ,FDR_bh_norm = p.adjust(`Pr(>|t|)_norm`, "fdr") ) -> Summary_statistics_taxonomyX
     print("Association succesful" )
     
     if (Run_permutations == T){
@@ -659,12 +755,14 @@ Run_Associations = function( Prevalence, DF, Data_c, FILTER_n=20, Meta_n=c("Read
         Null_distribution = c()
         for (Permutation_n in seq(Permutation_number) ){
               Data_perm = Data_c
-              Data_perm$Status = sample(Data_c$Status, replace = F,size = dim(Data_c)[1] )
-              Association_analysis(Prevalence, DF_taxonomyX, Data_perm, FILTER= FILTER_n, Meta=Meta_n) -> Association_results_p
-              Null_distribution = c(Null_distribution, Association_results_p$`Pr(>|t|)_norm`)
+              Data_perm[Independent] = sample( as_vector(Data_c[Independent]), replace = F,size = dim(Data_c)[1] )
+              Association_analysis(Prevalence, DF_taxonomyX, Data_perm, FILTER= FILTER_n, Meta=Meta_n, X=Independent) -> Association_results_p
+              Null_distribution = c(Null_distribution, as_vector(Association_results_p[Permute_p]) )
         }
 
-      sapply( Summary_statistics_taxonomyX$`Pr(>|t|)_norm`, function(x){ sum( Null_distribution <= x  )/Permutation_number  } ) -> FDR_perm
+      #sapply( Summary_statistics_taxonomyX$`Pr(>|t|)_norm`, function(x){ sum( Null_distribution <= x  )/Permutation_number  } ) -> FDR_perm
+      Summary_statistics_taxonomyX["P"] = as_vector(Summary_statistics_taxonomyX[Permute_p])
+      FDR_perm = Compute_FDR_null(Summary_statistics_taxonomyX , Null_distribution, fdr_threshold=0.05  ) 
       FDR_perm[FDR_perm > 1] = 1
       Summary_statistics_taxonomyX %>% mutate(FDR_permutation = FDR_perm ) -> Summary_statistics_taxonomyX
       print("Permutations succesful" )
@@ -673,7 +771,19 @@ Run_Associations = function( Prevalence, DF, Data_c, FILTER_n=20, Meta_n=c("Read
   }
   return(Summary_statistics)
 }
-  
+Compute_FDR_null =  function(DF, Permutation_results,fdr_threshold = 0.05 ){
+  # calculate FDR for each observed P-value
+  fdr_values <- sapply(DF$P, function(p) {
+    # count number of false positives (i.e., permuted P < observed P)
+    false_positives <- sum(Permutation_results <= p)
+    # calculate FDR
+    fdr <- false_positives / sum(Permutation_results <= fdr_threshold)
+    # ensure FDR is between 0 and 1
+    fdr <- ifelse(fdr < 0, 0, ifelse(fdr > 1, 1, fdr))
+    return(fdr)
+  })
+  return(fdr_values)
+}  
 
 ##2.2.1 Check the effect of read number  per batch
 Association_results_rn = tibble()
@@ -701,17 +811,21 @@ Association_results_rn_meta %>% mutate(FDR = p.adjust(Meta_random_P, "fdr") ) %>
 
 ##2.2.2 Run association analysis between disease and gut taxa
 
-Run_Associations(Prevalence, All_taxonomy, Data_c, FILTER=10, Function=Association_analysis, Run_permutations = T) -> Association_results
+Run_Associations(Prevalence, All_taxonomy, Data_c, FILTER=10, Function=Association_analysis, Run_permutations = F) -> Association_results
+Association_results %>% filter(Taxonomic_level == "s") %>% ggplot(aes(x=-log10(FDR_bh), y = -log10(FDR_bh_norm) )) + geom_point() + theme_bw() + geom_abline() + geom_vline(xintercept = -log10(0.05) ) + geom_hline(yintercept = -log10(0.05) )
+
 
 ###2.2.3 Add info from balances
 Balances_results = tibble(Bug = unique(c(Balances[[1]], Balances[[3]]) ), Direction_balance = "Positive")
 Balances_results = rbind(Balances_results, tibble(Bug = unique(c(Balances[[2]], Balances[[4]] ) ), Direction_balance = "Negative") )
 left_join(Association_results,Balances_results) -> Association_results
+Association_results %>% filter(Taxonomic_level == "s") %>% ggplot(aes(x=-log10(FDR_bh), y = -log10(FDR_bh_norm), col=Direction_balance )) + geom_point() + theme_bw() + geom_abline() + geom_vline(xintercept = -log10(0.05) ) + geom_hline(yintercept = -log10(0.05) )
+
 
 ###2.2.4 Plot
 Association_results %>% ggplot(aes(x=Estimate_norm, y= -log10(`Pr(>|t|)_norm`), col=FDR_permutation<0.05, shape= is.na(Direction_balance) )) +
   geom_hline( yintercept = -log10(0.05), color="red" ) + geom_point() + theme_bw() + facet_wrap(~Taxonomic_level) +
-  geom_label_repel(data = Top_results %>% filter(FDR_permutation<0.05) %>% unique(),  aes(label = Bug), size=1.5, color = "black")
+  geom_label_repel(data = Association_results %>% filter(FDR_permutation<0.05) %>% unique(),  aes(label = Bug), size=1.5, color = "black")
 
 #Run associaton with all data
 Comp_Prevalence( select( filter(Taxonomic_replication_DMP2 )  , -ID) ) -> Prevalence_replication2
@@ -729,26 +843,7 @@ Association_results_all %>% filter(FDR_permutation < 0.05) %>% View()
 
 
 
-#Batch correction using PLSDAbatch
-library(2)
-
-#PLSDAbatch without sparsity... Probably overfitted
-taxa_test %>% dplyr::select(-ID) %>% as.matrix() %>%  plsda(X = ., Y = left_join(taxa_test, Covariates_test)$Status  , ncomp = 5) -> tune
-tune$prop_expl_var #1 component is enough to to explain all variability in Y
-taxa_test %>% dplyr::select(-ID) %>% as.matrix() %>% PLSDA_batch(X = .,  Y.trt = left_join(taxa_test, Covariates_test)$Status , Y.bat = left_join(taxa_test, Covariates_test)$Batch , ncomp.trt = 1, ncomp.bat = 10) -> ad.batch.tune
-ad.batch.tune$explained_variance.bat
-sum(ad.batch.tune$explained_variance.bat$Y[seq_len(2)])
-taxa_test %>% dplyr::select(-ID) %>% as.matrix() %>% PLSDA_batch(X = .,  Y.trt = left_join(taxa_test, Covariates_test)$Status , Y.bat = left_join(taxa_test, Covariates_test)$Batch , ncomp.trt = 1, ncomp.bat = 2) -> ad.PLSDA_batch.res
-ad.PLSDA_batch <- ad.PLSDA_batch.res$X.nobatch
-ad.PLSDA_batch %>% as_tibble() %>% mutate(ID=taxa_test$ID , .before=1 ) -> taxa_test_corrected
-Beta_taxonomy(NA, Data_c = left_join(taxa_test_corrected,Covariates_test) , taxa_test_corrected, Meta="Batch", Distance = "euclidean")
-
-Run_Associations(To_keep, taxa_test, left_join(taxa_test, Covariates_test), FILTER_n=20, Meta_n=c("Reads_clean"), Run_permutations = T ) -> Association_results_batchCorrected
-Association_results_batchCorrected %>% ggplot(aes(x=Estimate, y= -log10(`Pr(>|t|)_norm`), col=FDR_permutation<0.05 )) +
-  geom_hline( yintercept = -log10(0.05), color="red" ) + geom_point() + theme_bw() + facet_wrap(~Taxonomic_level) +
-  geom_label_repel(data = Association_results_all %>% filter(FDR_permutation<0.05) %>% unique(),  aes(label = Bug), size=1.5, color = "black")
-
-
+#
 ##2.2.3 Run association analysis between disease and gut taxa using Aldex2
 Aldex_results = tibble()
 for (Taxonomic_level in c("p", "c", "o", "f", "g", "s")){
@@ -778,8 +873,17 @@ Aldex_results %>% left_join(. ,Balances_results) %>% ggplot(. , aes(x=effect, y=
   geom_hline( yintercept = -log10(0.05), color="red" ) + geom_point() + theme_bw() + facet_wrap(~Taxonomic_level) +
   geom_label_repel(data = . %>% filter(wi.eBH<0.05) %>% unique(),  aes(label = Bug), size=1.5, color = "black")
 
-left_join(Association_results, Aldex_results, by = c("Bug", "Taxonomic_level")) %>% left_join(., Prevalence) %>%
+left_join(Association_results, Aldex_results, by = c("Bug", "Taxonomic_level")) %>% left_join(., Prevalence) -> Association_results_all
+Association_results_all %>%
     write_tsv( ., "Results/Summary_statistics_TaxonomyAnalysis.tsv")  
+
+Association_results_all %>% filter(Taxonomic_level == "s") %>% ggplot(aes(x=-log10(FDR_bh), y = -log10(we.eBH ), col=Direction_balance )) + geom_point() + theme_bw() + geom_abline() + geom_vline(xintercept = -log10(0.05) ) + geom_hline(yintercept = -log10(0.05) ) -> All_comparisons1
+Association_results_all %>% filter(Taxonomic_level == "s") %>% ggplot(aes(x=-log10(we.eBH), y = -log10(FDR_bh_norm), col=Direction_balance )) + geom_point() + theme_bw() + geom_abline() + geom_vline(xintercept = -log10(0.05) ) + geom_hline(yintercept = -log10(0.05) )-> All_comparisons2
+
+Association_results_all %>% filter(Taxonomic_level == "s") %>% ggplot(aes(x=-log10(FDR_bh), y = -log10(wi.eBH ), col=Direction_balance )) + geom_point() + theme_bw() + geom_abline() + geom_vline(xintercept = -log10(0.05) ) + geom_hline(yintercept = -log10(0.05) )-> All_comparisons3
+Association_results_all %>% filter(Taxonomic_level == "s") %>% ggplot(aes(x=-log10(wi.eBH ), y = -log10(FDR_bh_norm), col=Direction_balance )) + geom_point() + theme_bw() + geom_abline() + geom_vline(xintercept = -log10(0.05) ) + geom_hline(yintercept = -log10(0.05) )-> All_comparisons4
+
+( All_comparisons1 | All_comparisons2 )  / (All_comparisons3 | All_comparisons4 ) 
 
 
 ###Replication
@@ -886,6 +990,282 @@ Aldex_replication2 %>% filter(Bug %in%  filter(Aldex_results, wi.eBH < 0.05)$Bug
 
 
 left_join( Aldex_results %>% select(Bug, effect), Aldex_replication2%>% select(Bug, effect), by="Bug", suffix=c("_Study", "_validation") ) %>% ggplot(aes(x=effect_Study, y=effect_validation)) + geom_point() + theme_bw() + geom_abline()+ geom_smooth(method = "lm")
+
+
+
+
+
+
+##Association of Biomarkers
+readxl::read_excel("Data/Biomarkers.xlsx") -> Biomarkers
+Data_c$ID %>% sapply( function(x){ if( grepl("V2", x)  ){ substring(str_split(x, "_")[[1]][2], 2, 5)   }else( return(x) )  }  ) -> IDs
+
+Data_c %>% mutate(ID = as.vector(IDs) ) %>% filter(!grepl("LL", ID) ) -> Data_c2
+Data_c2 %>% dplyr::left_join(., Biomarkers, by="ID") %>% drop_na() %>% arrange(ID) -> Data_c2
+
+#Run_Associations(Prevalence, All_taxonomy %>% mutate(ID = IDs) %>% filter(ID %in% Data_c2$ID) %>% arrange()  , Data_c2, FILTER=10, Function=Association_analysis, Run_permutations = F, Independent = "Zonulin", Permute_p = "Pr(>|t|)" ) -> Association_results_zn2
+
+Run_Associations(Prevalence, All_taxonomy %>% mutate(ID = IDs) %>% filter(ID %in% Data_c2$ID) %>% arrange()  , Data_c2, FILTER=10, Function=Association_analysis, Run_permutations = F, Independent = "Zonulin") -> Association_results_zn
+Run_Associations(Prevalence, All_taxonomy %>% mutate(ID = IDs) %>% filter(ID %in% Data_c2$ID) %>% arrange()  , Data_c2, FILTER=10, Function=Association_analysis, Run_permutations = F, Independent = "Alfa1antitrypsine") -> Association_results_alfa
+Run_Associations(Prevalence, All_taxonomy %>% mutate(ID = IDs) %>% filter(ID %in% Data_c2$ID) %>% arrange()  , Data_c2, FILTER=10, Function=Association_analysis, Run_permutations = F, Independent = "Calprotectin") -> Association_results_cal
+
+
+rbind(rbind(Association_results_zn %>% mutate(Biomarker = "Zonulin"), Association_results_alfa%>% mutate(Biomarker = "Alfa1antitrypsine")), Association_results_cal %>%  mutate(Biomarker = "Calprotectin") ) -> Results_biomarkers
+#Control for FDR between all test per taxa level
+Results_biomarkers2 =tibble()
+for (TL in unique(Results_biomarkers$Taxonomic_level) ){
+  Results_biomarkers %>% filter(Taxonomic_level == TL ) %>% mutate(FDR_all_bh = p.adjust(`Pr(>|t|)`, "fdr"), FDR_all_bh_norm = p.adjust(`Pr(>|t|)_norm`, "fdr")   ) %>% rbind(Results_biomarkers2 , . ) -> Results_biomarkers2
+}
+
+Results_biomarkers2 %>% write_tsv(. , "Results/Biomarkers_summarystats.tsv")
+
+Results_biomarkers %>% left_join(Balances_results) %>% filter(Taxonomic_level == "s") %>% ggplot(aes(x=-log10(FDR_bh), y = -log10(FDR_bh_norm ), col=Direction_balance )) + geom_point() + theme_bw() + geom_abline() + geom_vline(xintercept = -log10(0.05) ) + geom_hline(yintercept = -log10(0.05) ) + facet_wrap(~Biomarker)
+Results_biomarkers2 %>% left_join(Balances_results) %>% filter(Taxonomic_level == "s") %>% ggplot(aes(x=-log10(FDR_all_bh), y = -log10(FDR_all_bh_norm ), col=Direction_balance )) + geom_point() + theme_bw() + geom_abline() + geom_vline(xintercept = -log10(0.05) ) + geom_hline(yintercept = -log10(0.05) ) + facet_wrap(~Biomarker)
+
+
+
+
+filter(Results_biomarkers, FDR_permutation < 0.05)$Bug %>% sapply(function(x){ if ( grepl("s__", x) ) { str_split(x, "\\|s__")[[1]][2] } }) -> short_names_keep
+colnames(All_taxonomy) %>% sapply(function(x){ if ( grepl("s__", x) ) { str_split(x, "\\|s__")[[1]][2] } else(return(x)) }) -> short_names
+All_taxonomy_figure = All_taxonomy
+colnames(All_taxonomy_figure) = short_names
+
+All_taxonomy_figure %>% mutate(ID = IDs) %>% filter(ID %in% Data_c2$ID) %>% arrange() %>% dplyr::left_join(., Biomarkers, by="ID") %>% drop_na() -> All_taxonomy_figure
+
+All_taxonomy_figure %>%
+ select("ID", as.vector(short_names_keep), "Zonulin", "Alfa1antitrypsine", "Calprotectin" ) %>% gather(Bimarker, concentration, Zonulin:Calprotectin) %>% gather("Bacterium", "CLR_abundance" ,2:8) %>% ggplot(aes(x=concentration, y=CLR_abundance)) + geom_point() + 
+  theme_bw() + facet_grid(Bacterium~Bimarker, scales = "free") + geom_smooth(se=F, method = lm) + theme(strip.text.y = element_text(size = 4))
+
+
+All_taxonomy %>% ggplot(aes(x=`k__Bacteria|p__Actinobacteria|c__Coriobacteriia|o__Eggerthellales|f__Eggerthellaceae|g__Eggerthellaceae gen. incertae sedis|s__Eggerthellaceae species incertae sedis [ext_mOTU_v3_16295]`)) + geom_histogram() + theme_bw()
+Data_c %>% ggplot(aes(x=`k__Bacteria|p__Actinobacteria|c__Coriobacteriia|o__Eggerthellales|f__Eggerthellaceae|g__Eggerthellaceae gen. incertae sedis|s__Eggerthellaceae species incertae sedis [ext_mOTU_v3_16295]`)) + geom_histogram() + theme_bw()
+All_taxonomy %>% ggplot(aes(x=Inverse_rank_normal(`k__Bacteria|p__Actinobacteria|c__Coriobacteriia|o__Eggerthellales|f__Eggerthellaceae|g__Eggerthellaceae gen. incertae sedis|s__Eggerthellaceae species incertae sedis [ext_mOTU_v3_16295]`) )) + geom_histogram() + theme_bw()
+
+Run_aldex = function(Data, Bm="Zonulin"){
+  Aldex_results_biom = tibble()
+  Data$ID %>% sapply( function(x){ if( grepl("V2", x)  ){ substring(str_split(x, "_")[[1]][2], 2, 5)   }else( return(x) )  }  ) -> IDs
+  for (Taxonomic_level in c("p", "c", "o", "f", "g", "s")){
+    Prevalence %>% filter(N_case > 20) -> To_run 
+  
+    print( paste0("Subsetting features of taxonomic level: ", Taxonomic_level) )
+    paste(c(Taxonomic_level, "__"), collapse="" ) -> Ta
+  
+    colnames(dplyr::select(Data, - one_of(c("ID" )))) -> Taxa
+    Select_taxonomy_level(Taxa, Ta) -> Taxa
+  
+    Data %>% mutate(ID = IDs) %>% dplyr::select( one_of(c("ID", Taxa) )) %>% select_if( colnames(.) %in% c("ID", To_run$Bug)) %>% filter(ID %in% Data_c2$ID ) %>% arrange(ID) -> Data_taxonomyX
+    Data_taxonomyX %>% as.data.frame() %>% column_to_rownames("ID") %>% t() -> Input_aldex
+    #print("Calling association function" )
+    mm <- model.matrix(as.formula(paste0("~ Age + Sex + ", Bm)) , Data_c2)
+    x <- ALDEx2::aldex.clr(Input_aldex, mm, mc.samples=160, denom="all", verbose=FALSE)
+    x.tt <- Check(x, mm, verbose=FALSE) #this function might not work... I wrote a modified version in which the glm call does not have the "..." and works, find at the bottom
+    #x.tt2 = ALDEx2::aldex.corr(x, Data_c2$Zonulin )
+    #x.effect <- ALDEx2::aldex.glm.effect(x, mm, CI=T, verbose=FALSE )
+    
+    x.all <- data.frame(x.tt)
+    x.all %>% rownames_to_column("Bug") %>% as_tibble() %>% mutate(Taxonomic_level = Taxonomic_level) -> Result_taxa
+    colnames(Result_taxa)[14:17] = c("Estimate", "SE", "T_value", "P")
+    colnames(Result_taxa)[21] = c("FDR")
+    #print("Association succesful" )
+    rbind(Aldex_results_biom, Result_taxa) -> Aldex_results_biom
+  }
+  return(Aldex_results_biom)
+}  
+Check = function (clr, verbose = FALSE, ...) {
+  conditions <- clr@conds
+  lr2glm <- function(lr, conditions, ...) {
+    if (!is(conditions, "matrix") && !("assign" %in% names(attributes(conditions)))) {
+      stop("Please define the aldex.clr object for a model.matrix 'conditions'.")
+    }
+    if (nrow(lr) != nrow(conditions)) {
+      stop("Input data and 'model.matrix' should have same number of rows.")
+    }
+    model. <- conditions
+    #print("Applying model")
+    #print(as_tibble(lr))
+    #print(model.)
+    #print("now...")
+    glms <- apply(lr, 2, function(x) {
+      glm(x ~ model.)
+    })
+    extract <- function(model) {
+      x <- coef(summary(model))
+      coefs <- lapply(1:nrow(x), function(i) {
+        y <- x[i, , drop = FALSE]
+        colnames(y) <- paste(rownames(y), colnames(y))
+        y
+      })
+      do.call("cbind", coefs)
+    }
+    #print("Extracting coefficients")
+    extracts <- lapply(glms, extract)
+    #print("Binding")
+    df <- do.call("rbind", extracts)
+    rownames(df) <- colnames(lr)
+    df <- as.data.frame(df)
+    pvals <- colnames(df)[grepl("Pr\\(>", colnames(df))]
+    df.bh <- df[, pvals]
+    colnames(df.bh) <- paste0(colnames(df.bh), ".BH")
+    for (j in 1:ncol(df.bh)) {
+      df.bh[, j] <- p.adjust(df.bh[, j])
+    }
+    cbind(df, df.bh)
+  }
+  if (verbose) 
+    message("running tests for each MC instance:")
+  mc <- ALDEx2::getMonteCarloInstances(clr)
+  k <- ALDEx2::numMCInstances(clr)
+  r <- 0
+  for (i in 1:k) {
+    if (verbose == TRUE) 
+      numTicks <- progress(i, k, numTicks)
+    mci_lr <- t(sapply(mc, function(x) x[, i]))
+    r <- r + lr2glm(mci_lr, conditions, ...)
+  }
+  r/k
+}
+
+
+Alex_results_biomarkers = tibble()  
+for (Biomarker in colnames(Biomarkers) ){
+  if (Biomarker %in% c("ID", "Biovis_Batch") ){ next }
+  Run_aldex(Data, Biomarker) %>% mutate(Biomarker = Biomarker) %>% rbind(. , Alex_results_biomarkers) -> Alex_results_biomarkers
+
+}
+Interest= c("Bug",  "Estimate", "SE", "T_value", "P", "FDR" )
+
+left_join(Alex_results_biomarkers, Results_biomarkers, by=c("Bug", "Biomarker", "Taxonomic_level")) %>% left_join(Balances_results) %>% filter(Taxonomic_level == "s") %>% 
+  ggplot(aes(x=-log10(FDR_bh), y = -log10(FDR), col=Direction_balance )) + geom_point() + theme_bw() + geom_abline() + geom_vline(xintercept = -log10(0.05) ) + geom_hline(yintercept = -log10(0.05) ) + facet_wrap(~Biomarker)
+left_join(Alex_results_biomarkers, Results_biomarkers, by=c("Bug", "Biomarker", "Taxonomic_level")) %>% left_join(Balances_results) %>% filter(Taxonomic_level == "s") %>% 
+  ggplot(aes(x=-log10(FDR_bh_norm), y = -log10(FDR), col=Direction_balance )) + geom_point() + theme_bw() + geom_abline() + geom_vline(xintercept = -log10(0.05) ) + geom_hline(yintercept = -log10(0.05) ) + facet_wrap(~Biomarker)  
+  
+  
+
+
+
+
+left_join(Results_biomarkers, Alex_results_biomarkers, by = c("Bug","Biomarker", "Taxonomic_level")) %>% left_join(., Prevalence) -> Merged_biomarkers
+Merged_biomarkers %>%  write_tsv( ., "Results/Summary_statistics_TaxonomyAnalysis_biomarkers.tsv")  
+
+
+Merged_biomarkers %>% filter(FDR_permutation < 0.05) %>% select(N_case)
+Merged_biomarkers %>% filter(FDR_permutation < 0.05) %>% select(Bug, Biomarker)
+#Checking significant assocations.
+Check_plots_assocation = function(Long_name, Short_name, Marker){
+  
+  x1 = as_vector(All_taxonomy_figure[Short_name])
+  x2 = Inverse_rank_normal(as_vector(All_taxonomy_figure[Short_name]))
+  x3 = as_vector(Data_c2[Long_name]) > 0
+  y1 = as_vector(All_taxonomy_figure[Marker])
+  
+  New_v = tibble(Bug1 = x1, Bug2 = x2 , Bug3 =  x3,  Marker = y1)
+  Plot1 = New_v %>% ggplot(aes(x=Bug1, y = Marker)) + geom_point() + theme_bw() + geom_smooth(se=F, method = lm) + xlab(Short_name) + ylab(Marker) + ggtitle("CLR")
+  Plot2 = New_v %>% ggplot(aes(x=Bug2, y = Marker)) + geom_point() + theme_bw() + geom_smooth(se=F, method = lm) + xlab(Short_name) + ylab(Marker) + ggtitle("InvRank_CLR")
+  Plot3 = New_v %>% ggplot(aes(x=Bug3, y = Marker)) + geom_boxplot() + geom_jitter() + theme_bw() + geom_smooth(se=F, method = lm) + xlab(Short_name) + ylab(Marker) + ggtitle("Precence/Absence")
+  Plot_bug = Plot1 | Plot2 | Plot3
+  print(Plot_bug)
+  
+}
+
+#1. Eggerthela and Zonulin.
+Check_plots_assocation("k__Bacteria|p__Actinobacteria|c__Coriobacteriia|o__Eggerthellales|f__Eggerthellaceae|g__Eggerthellaceae gen. incertae sedis|s__Eggerthellaceae species incertae sedis [ext_mOTU_v3_16295]","Eggerthellaceae species incertae sedis [ext_mOTU_v3_16295]", "Zonulin")
+Check_plots_assocation("k__Bacteria|p__Bacteroidetes|c__Bacteroidia|o__Bacteroidales|f__Bacteroidaceae|g__Bacteroides|s__Bacteroides intestinalis [ref_mOTU_v3_02809]","Bacteroides intestinalis [ref_mOTU_v3_02809]", "Zonulin") #Prevalence <0.2
+Check_plots_assocation("k__Bacteria|p__Bacteroidetes|c__Bacteroidia|o__Bacteroidales|f__Prevotellaceae|g__Prevotella|s__Prevotella species incertae sedis [meta_mOTU_v3_12510]","Prevotella species incertae sedis [meta_mOTU_v3_12510]", "Zonulin") #Prevalence < 0.2
+#Not clear differences in presence/absence, not sure 
+Check_plots_assocation("k__Bacteria|p__Firmicutes|c__Clostridia|o__Clostridiales|f__Clostridiales fam. incertae sedis|g__Clostridiales gen. incertae sedis|s__Clostridiales species incertae sedis [ext_mOTU_v3_26621]","Clostridiales species incertae sedis [ext_mOTU_v3_26621]", "Zonulin") #Prevalence < 0.2
+Check_plots_assocation("k__Bacteria|p__Firmicutes|c__Clostridia|o__Clostridiales|f__Lachnospiraceae|g__Blautia|s__[Ruminococcus] torques [ref_mOTU_v3_03703]","[Ruminococcus] torques [ref_mOTU_v3_03703]", "Alfa1antitrypsine")
+Check_plots_assocation("k__Bacteria|p__Firmicutes|c__Clostridia|o__Clostridiales|f__Ruminococcaceae|g__Ruminococcaceae gen. incertae sedis|s__Ruminococcaceae species incertae sedis [meta_mOTU_v3_13455]","Ruminococcaceae species incertae sedis [meta_mOTU_v3_13455]", "Alfa1antitrypsine")
+#Strange association in CLR
+Check_plots_assocation("k__Bacteria|p__Firmicutes|c__Clostridia|o__Clostridiales|f__Lachnospiraceae|g__Blautia|s__[Ruminococcus] torques [ref_mOTU_v3_03703]","Ruminococcaceae species incertae sedis [meta_mOTU_v3_13455]", "Calprotectin")
+Check_plots_assocation("k__Bacteria|p__Firmicutes|c__Negativicutes|o__Acidaminococcales|f__Acidaminococcaceae|g__Acidaminococcus|s__Acidaminococcus intestini [ref_mOTU_v3_01949]","Acidaminococcus intestini [ref_mOTU_v3_01949]", "Calprotectin") #Prevalence < 0.2
+
+#Significant in non-inv rank
+Check_plots_assocation("k__Bacteria|p__Actinobacteria|c__Coriobacteriia|o__Eggerthellales|f__Eggerthellaceae|g__Eggerthella|s__Eggerthella lenta [ref_mOTU_v3_00719]","Eggerthella lenta [ref_mOTU_v3_00719]", "Zonulin")
+Check_plots_assocation("k__Bacteria|p__Firmicutes|c__Clostridia|o__Clostridiales|f__Oscillospiraceae|g__Oscillibacter|s__Oscillibacter species incertae sedis [ext_mOTU_v3_17772]","Oscillibacter species incertae sedis [ext_mOTU_v3_17772]", "Zonulin")
+Check_plots_assocation("k__Bacteria|p__Firmicutes|c__Clostridia|o__Clostridiales|f__Clostridiales fam. incertae sedis|g__Clostridiales gen. incertae sedis|s__Clostridiales species incertae sedis [meta_mOTU_v3_13390]","Clostridiales species incertae sedis [meta_mOTU_v3_13390]", "Zonulin")
+
+
+
+#Test presence/absence
+Binary_association = function(D,Items, Prevalence_t){
+  Taxonomic_level_result = tibble()
+  for (Bug in dplyr::filter( dplyr::filter(Prevalence, Bug %in% Items) , N_case>Prevalence_t & N_case < 103-Prevalence_t  )$Bug ){
+    Formula = paste0(Biomarker, "~ `" , Bug, "`")
+    Data_c3 = D
+    Data_c3[Bug] = D[Bug] > 0
+    lm( Formula ,  Data_c3) %>% summary() -> Model
+    as.data.frame(Model$coefficients)[paste0("`", Bug, "`"),] %>% rownames_to_column("Bug") %>% mutate(Biomarker= Biomarker, Taxonomic_level=str_replace(Taxa_level, "__", "") ) %>% rbind(Taxonomic_level_result, .) -> Taxonomic_level_result
+  }
+  Taxonomic_level_result %>% mutate(FDR_bh_level = p.adjust(`Pr(>|t|)`, "fdr") ) -> Taxonomic_level_result
+  return(Taxonomic_level_result)
+}
+Results_binary = tibble()
+Permutation = F
+for (Biomarker in colnames(Biomarkers)){
+  if (Biomarker %in% c("ID", "Biovis_Batch") ){ next }
+  print(Biomarker)
+  for ( Taxa_level in c("p__", "c__", "o__", "f__", "g__", "s__") ){
+    Select_taxonomy_level(Prevalence$Bug, Taxa_level) -> Items
+    Taxonomic_level_result = tibble()
+    Binary_association(Data_c2, Items, 10) %>% as_tibble() %>% drop_na() -> Summary_statistics_taxonomyX 
+    
+  
+    if (Permutation == T){
+      print("Running permutations" )
+      Null_distribution = c()
+    for (Permutation_n in seq(100) ){
+        print(paste0("running permutation: ", Permutation_n))
+        Data_perm = Data_c2
+        Data_perm[Biomarker] = sample( as_vector(Data_c2[Biomarker]), replace = F,size = dim(Data_c2)[1] )
+        Binary_association(Data_perm, Items, 20) %>% as_tibble()  %>% drop_na()  -> Association_results_p
+        Null_distribution = c(Null_distribution, Association_results_p$`Pr(>|t|)` ) 
+      }
+    Summary_statistics_taxonomyX["P"] = as_vector(Summary_statistics_taxonomyX["Pr(>|t|)"])
+    FDR_perm = Compute_FDR_null(Summary_statistics_taxonomyX , Null_distribution, fdr_threshold=0.05  ) 
+    FDR_perm[FDR_perm > 1] = 1
+    Summary_statistics_taxonomyX %>% mutate(FDR_permutation = FDR_perm ) -> Summary_statistics_taxonomyX
+    print("Permutations succesful" )
+    }
+    
+    
+    Results_binary = rbind ( Results_binary, Summary_statistics_taxonomyX )
+      
+    }
+  }    
+
+#Control for FDR between all test per taxa level
+Results_binary2 =tibble()
+for (TL in unique(Results_binary$Taxonomic_level) ){
+  Results_binary %>% filter(Taxonomic_level == TL ) %>% mutate(FDR_all_bh = p.adjust(`Pr(>|t|)`, "fdr")  ) %>% rbind(Results_binary2 , . ) -> Results_binary2
+}
+Results_binary2$Bug =  str_replace(Results_binary2$Bug, "TRUE", "") %>% str_replace_all(. , "`", "") 
+left_join(Results_binary2, Results_biomarkers2, by=c("Bug", "Biomarker", "Taxonomic_level"), suffix=c("_Binary", "_Continuous") ) %>% left_join(Balances_results) %>% filter(Taxonomic_level == "s") %>% 
+  ggplot(aes(x=-log10(FDR_all_bh_Binary), y = -log10(FDR_all_bh_Continuous), col=Direction_balance )) + geom_point() + theme_bw() + geom_abline() + geom_vline(xintercept = -log10(0.05) ) + geom_hline(yintercept = -log10(0.05) ) + facet_wrap(~Biomarker) -> Plot1
+left_join(Results_binary2, Results_biomarkers2, by=c("Bug", "Biomarker", "Taxonomic_level"), suffix=c("_Binary", "_Continuous") ) %>% left_join(Balances_results) %>% filter(Taxonomic_level == "s") %>% 
+  ggplot(aes(x=-log10(FDR_all_bh_Binary), y = -log10(FDR_all_bh_norm), col=Direction_balance )) + geom_point() + theme_bw() + geom_abline() + geom_vline(xintercept = -log10(0.05) ) + geom_hline(yintercept = -log10(0.05) ) + facet_wrap(~Biomarker) -> Plot2
+Plot1 | Plot2 
+Results_binary2 %>%  write_tsv( ., "Results/Summary_statistics_biomarkers_binary.tsv")  
+
+
+
+colnames(Data_c2)[grepl("s__", colnames(Data_c2))] -> For_beta
+Data_c2 %>% select(For_beta) %>% vegdist(method = "jaccard") -> JD
+Data_c2 %>% select(For_beta) %>% vegdist(method = "robust.aitchison") -> AD
+#Binary matrix
+adonis2(JD ~ Zonulin , Data_c2) #0.017 / R2 0.012
+adonis2(JD ~ Alfa1antitrypsine , Data_c2) #0.106 / R2 0.011
+adonis2(JD ~ Calprotectin , Data_c2) #0.148 / R2 0.11
+#Aitchison distance
+adonis2(AD ~ Zonulin , Data_c2) #0.033 / R2 0.012
+adonis2(AD ~ Alfa1antitrypsine , Data_c2) #0.226 / R2 0.10
+adonis2(AD ~ Calprotectin , Data_c2) #0.335 / R2 0.010
+
+All_taxonomy_figure$ID = IDs
+All_taxonomy_figure %>% left_join(Biomarkers) %>% drop_na() -> All_taxonomy_figure
+Check_plots_assocation("k__Bacteria|p__Firmicutes|c__Clostridia|o__Clostridiales|f__Ruminococcaceae|g__Ruminococcaceae gen. incertae sedis|s__Ruminococcaceae species incertae sedis [meta_mOTU_v3_12259]","Ruminococcaceae species incertae sedis [meta_mOTU_v3_12259]", "Zonulin")
+
+
+
 
 
 #X. Compare Gut-brain modules
@@ -1045,5 +1425,9 @@ Permanova_stats %>% filter(Distance == "allele") %>% mutate(FDR = p.adjust(Stat,
 # s__Sutterella species incertae sedis [meta_mOTU_v3_13005]
 # Clostridiales species incertae sedis [meta_mOTU_v3_12974]
 # Not in differential abundance or network  
+
+
+
+
 
 
